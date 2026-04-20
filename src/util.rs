@@ -132,6 +132,13 @@ pub fn runtime_icon_search_paths() -> Vec<PathBuf> {
         paths.push(dev_assets);
     }
 
+    if let Some(home) = home_dir() {
+        let local_icons = home.join(".local/share/icons");
+        if local_icons.exists() {
+            paths.push(local_icons);
+        }
+    }
+
     if let Ok(exe) = env::current_exe()
         && let Some(bin_dir) = exe.parent()
     {
@@ -142,6 +149,72 @@ pub fn runtime_icon_search_paths() -> Vec<PathBuf> {
     }
 
     paths
+}
+
+pub fn install_local_desktop_integration() -> Option<()> {
+    let home = home_dir()?;
+    let source_icons_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/icons/hicolor");
+    let desktop_target = home.join(format!(
+        ".local/share/applications/{}.desktop",
+        constants::APP_ID
+    ));
+    let pixmaps_target = home.join(format!(".local/share/pixmaps/{}.png", constants::APP_ICON));
+    let current_exe = env::current_exe().ok()?;
+
+    if let Some(parent) = desktop_target.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    if let Some(parent) = pixmaps_target.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+
+    for size in ["64x64", "128x128", "256x256", "512x512"] {
+        let source = source_icons_root
+            .join(size)
+            .join("apps")
+            .join(format!("{}.png", constants::APP_ICON));
+        if !source.exists() {
+            continue;
+        }
+
+        let target = home
+            .join(".local/share/icons/hicolor")
+            .join(size)
+            .join("apps")
+            .join(format!("{}.png", constants::APP_ICON));
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).ok()?;
+        }
+        let _ = fs::copy(&source, &target);
+
+        if size == "256x256" {
+            let _ = fs::copy(&source, &pixmaps_target);
+        }
+    }
+
+    let desktop_content = format!(
+        "[Desktop Entry]\nName={name}\nComment=VoidShell tiling terminal for Fedora GNOME\nExec={exec}\nIcon={icon}\nTerminal=false\nType=Application\nCategories=System;TerminalEmulator;GTK;\nStartupNotify=true\nStartupWMClass={wm_class}\n",
+        name = constants::APP_NAME,
+        exec = desktop_exec_value(&current_exe),
+        icon = constants::APP_ICON,
+        wm_class = constants::APP_ID,
+    );
+    let _ = fs::write(&desktop_target, desktop_content);
+
+    if command_exists("update-desktop-database") {
+        let _ = std::process::Command::new("update-desktop-database")
+            .arg(home.join(".local/share/applications"))
+            .output();
+    }
+
+    if command_exists("gtk-update-icon-cache") {
+        let _ = std::process::Command::new("gtk-update-icon-cache")
+            .args(["-f", "-t"])
+            .arg(home.join(".local/share/icons/hicolor"))
+            .output();
+    }
+
+    Some(())
 }
 
 pub fn display_path(path: &Path) -> String {
@@ -164,6 +237,13 @@ pub fn shell_quote(input: &str) -> String {
 
     let escaped = input.replace('\'', "'\"'\"'");
     format!("'{escaped}'")
+}
+
+fn desktop_exec_value(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace(' ', "\\ ")
 }
 
 pub fn first_command_token(command: &str) -> Option<String> {

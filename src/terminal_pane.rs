@@ -254,11 +254,12 @@ impl TerminalPane {
     }
 
     pub fn show_banner_info(&self) {
-        let mut payload = String::from("\r\n");
-        payload.push_str(&banner::startup_payload_for_columns(
+        let rendered = banner::startup_payload_for_columns(
             &self.shell_path,
             Some(self.terminal.column_count() as usize),
-        ));
+        );
+        let mut payload = String::from("\r\n");
+        payload.push_str(&rendered.replace('\n', "\r\n"));
         payload.push_str("\r\n");
         self.terminal.feed(payload.as_bytes());
         self.flash_action();
