@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.voidscripter.TermVoid</id>
+  <name>VoidShell</name>
+  <summary>VoidShell tiling terminal with GTK4, libadwaita and VTE</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>VoidShell is a real VTE-backed terminal emulator for Fedora GNOME with tiling panes, contextual chrome, a command palette and persistent preferences.</p>
+  </description>
+  <launchable type="desktop-id">io.github.voidscripter.TermVoid.desktop</launchable>
+  <provides>
+    <binary>termvoid</binary>
+  </provides>
+  <categories>
+    <category>System</category>
+    <category>TerminalEmulator</category>
+  </categories>
+</component>

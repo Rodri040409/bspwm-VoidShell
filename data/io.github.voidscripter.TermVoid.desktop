@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=VoidShell
+Comment=VoidShell tiling terminal for Fedora GNOME
+Exec=termvoid
+Icon=io.github.voidscripter.TermVoid
+Terminal=false
+Type=Application
+Categories=System;TerminalEmulator;GTK;
+StartupNotify=true
+StartupWMClass=io.github.voidscripter.TermVoid

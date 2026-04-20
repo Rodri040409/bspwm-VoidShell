@@ -1,0 +1,10 @@
+pub const APP_ID: &str = "io.github.voidscripter.TermVoid";
+pub const APP_NAME: &str = "VoidShell";
+pub const APP_ICON: &str = "io.github.voidscripter.TermVoid";
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const CONFIG_QUALIFIER: &str = "io.github";
+pub const CONFIG_ORGANIZATION: &str = "voidscripter";
+pub const CONFIG_APPLICATION: &str = "TermVoid";
+pub const ALT_SPACE_FALLBACK: &str = "<Primary><Shift>p";
+pub const DEFAULT_RESIZE_STEP: f32 = 0.05;
+pub const CONTEXT_REFRESH_MS: u64 = 1200;
