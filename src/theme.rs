@@ -29,24 +29,24 @@ impl PanePalettePreset {
 
     pub fn from_name(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "red" | "ruby" => Some(Self::Red),
-            "green" | "emerald" => Some(Self::Green),
-            "blue" | "azure" => Some(Self::Blue),
-            "amber" | "gold" | "yellow" => Some(Self::Amber),
-            "rose" | "pink" => Some(Self::Rose),
-            "cyan" | "teal" => Some(Self::Cyan),
+            "red" | "ruby" | "rojo" => Some(Self::Red),
+            "green" | "emerald" | "verde" => Some(Self::Green),
+            "blue" | "azure" | "azul" => Some(Self::Blue),
+            "amber" | "gold" | "yellow" | "ambar" | "ámbar" => Some(Self::Amber),
+            "rose" | "pink" | "rosa" => Some(Self::Rose),
+            "cyan" | "teal" | "cian" => Some(Self::Cyan),
             _ => None,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Red => "Red",
-            Self::Green => "Green",
-            Self::Blue => "Blue",
-            Self::Amber => "Amber",
-            Self::Rose => "Rose",
-            Self::Cyan => "Cyan",
+            Self::Red => "Rojo",
+            Self::Green => "Verde",
+            Self::Blue => "Azul",
+            Self::Amber => "Ámbar",
+            Self::Rose => "Rosa",
+            Self::Cyan => "Cian",
         }
     }
 
@@ -117,7 +117,7 @@ pub fn terminal_palette(config: &AppConfig, preset: Option<PanePalettePreset>) -
         let preset = preset_theme(preset);
         let foreground = util::parse_rgba(preset.foreground, "#f4eeff");
         let mut background = util::parse_rgba(preset.background, "#151120");
-        background.set_alpha(0.22);
+        background.set_alpha(0.14);
         let cursor = util::parse_rgba(preset.accent, "#b98cff");
         let cursor_text = util::parse_rgba(preset.cursor_text, "#120d1d");
         let palette = preset
@@ -137,7 +137,7 @@ pub fn terminal_palette(config: &AppConfig, preset: Option<PanePalettePreset>) -
 
     let foreground = util::parse_rgba(&config.foreground_color, "#f4eeff");
     let mut background = util::parse_rgba(&config.surface_color, "#151120");
-    background.set_alpha(0.18);
+    background.set_alpha(0.12);
     let cursor = util::parse_rgba(&config.accent_color, "#b98cff");
     let cursor_text = util::parse_rgba("#120d1d", "#120d1d");
 
@@ -160,10 +160,22 @@ pub fn terminal_palette(config: &AppConfig, preset: Option<PanePalettePreset>) -
 
 fn build_css(config: &AppConfig) -> String {
     let mut surface = util::parse_rgba(&config.surface_color, "#151120");
-    surface.set_alpha(0.72);
+    surface.set_alpha(0.36);
     let accent = util::parse_rgba(&config.accent_color, "#b98cff");
     let active = util::parse_rgba(&config.active_border_color, "#d2a1ff");
     let foreground = util::parse_rgba(&config.foreground_color, "#f4eeff");
+    let mut window_surface = surface.clone();
+    window_surface.set_alpha(0.20);
+    let mut header_surface = surface.clone();
+    header_surface.set_alpha(0.24);
+    let mut pane_tint = surface.clone();
+    pane_tint.set_alpha(0.42);
+    let mut accent_glow = accent.clone();
+    accent_glow.set_alpha(0.18);
+    let mut active_glow = active.clone();
+    active_glow.set_alpha(0.26);
+    let mut active_border_glow = active.clone();
+    active_border_glow.set_alpha(0.12);
     let border_width = config.active_border_width.max(1);
     let shadow = if config.enable_animations {
         "transition: border-color 170ms ease, box-shadow 220ms ease, background-color 220ms ease, opacity 220ms ease, transform 220ms cubic-bezier(0.18, 0.9, 0.22, 1.0);"
@@ -179,66 +191,86 @@ fn build_css(config: &AppConfig) -> String {
     format!(
         r#"
 window {{
-  background:
-    radial-gradient(circle at top, rgba(130, 96, 214, 0.12), transparent 36%),
-    linear-gradient(180deg, rgba(9, 7, 17, 0.99), rgba(16, 12, 25, 1.0));
+  background: rgba(6, 6, 9, 0.98);
 }}
 
 .app-shell {{
   background: transparent;
 }}
 
-.termvoid-headerbar {{
+.window-surface {{
   background:
-    linear-gradient(180deg, rgba(18, 13, 29, 0.96), rgba(12, 9, 22, 0.98));
-  border-bottom: 1px solid rgba(214, 163, 255, 0.10);
+    radial-gradient(circle at 18% 0%, rgba(255, 255, 255, 0.03), transparent 32%),
+    radial-gradient(circle at 100% 100%, {accent_glow}, transparent 28%),
+    linear-gradient(180deg, rgba(7, 7, 11, 0.58), rgba(7, 8, 12, 0.76));
+}}
+
+.window-toolbar-view {{
+  background: transparent;
+}}
+
+.termvoid-headerbar {{
+  margin: 12px 16px 0;
+  padding: 4px 8px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.065), rgba(255, 255, 255, 0.018)),
+    {header_surface};
+  box-shadow:
+    0 14px 32px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
   color: {foreground};
 }}
 
 .termvoid-title {{
   color: {foreground};
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.18);
 }}
 
 .layout-surface {{
-  padding: 16px;
+  padding: 14px 16px 16px;
   background:
-    radial-gradient(circle at top right, rgba(173, 114, 255, 0.14), transparent 32%),
-    radial-gradient(circle at bottom left, rgba(120, 74, 190, 0.10), transparent 26%),
-    linear-gradient(180deg, rgba(10, 8, 19, 0.96), rgba(15, 10, 24, 0.99));
+    radial-gradient(circle at 0% 20%, rgba(255, 255, 255, 0.02), transparent 24%),
+    radial-gradient(circle at 100% 0%, {active_border_glow}, transparent 26%),
+    linear-gradient(180deg, rgba(6, 7, 10, 0.10), rgba(5, 6, 8, 0.22));
 }}
 
 .shared-wallpaper {{
-  opacity: 0.96;
+  opacity: 1.0;
 }}
 
 .shared-wallpaper-tint {{
   background:
-    radial-gradient(circle at 20% 0%, rgba(36, 22, 59, 0.40), transparent 34%),
-    linear-gradient(180deg, rgba(9, 6, 18, 0.46), rgba(11, 8, 22, 0.60));
+    radial-gradient(circle at 24% 0%, rgba(255, 255, 255, 0.08), transparent 30%),
+    radial-gradient(circle at 86% 20%, {accent_glow}, transparent 28%),
+    linear-gradient(180deg, rgba(9, 10, 14, 0.30), rgba(7, 7, 9, 0.48));
 }}
 
 .layout-surface.zoomed {{
-  padding: 10px;
+  padding: 10px 12px 12px;
 }}
 
 .terminal-pane-shell {{
-  border-radius: 20px;
-  border: {border_width}px solid rgba(224, 188, 255, 0.08);
+  border-radius: 18px;
+  border: {border_width}px solid rgba(255, 255, 255, 0.10);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.040), rgba(255, 255, 255, 0.012)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.018)),
     {surface};
   box-shadow:
-    0 16px 38px rgba(0, 0, 0, 0.30),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    0 22px 52px rgba(0, 0, 0, 0.30),
+    0 0 0 1px rgba(255, 255, 255, 0.02),
+    inset 0 1px 0 rgba(255, 255, 255, 0.10);
   {shadow}
 }}
 
 .terminal-pane-shell.active {{
   border-color: {active};
   box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.03),
-    0 18px 42px rgba(0, 0, 0, 0.34),
-    0 0 30px rgba(185, 140, 255, 0.18);
+    0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 30px 70px rgba(0, 0, 0, 0.40),
+    0 0 0 1px {active_border_glow},
+    0 0 42px {active_glow};
 }}
 
 .terminal-pane-shell.mode-editor.active {{
@@ -256,23 +288,101 @@ window {{
 .terminal-pane-shell.action-flash {{
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, 0.05),
-    0 0 36px rgba(185, 140, 255, 0.28);
+    0 0 44px {accent_glow};
 }}
 
 .terminal-pane-shell.pane-born {{
   opacity: 0.0;
-  transform: translateY(12px) scale(0.985);
   box-shadow:
     0 0 0 rgba(0, 0, 0, 0.0),
     inset 0 1px 0 rgba(255, 255, 255, 0.00);
 }}
 
+.terminal-pane-shell.spawn-from-center {{
+  transform: scale(0.962);
+}}
+
+.terminal-pane-shell.spawn-from-left {{
+  transform: translateX(-72px) scale(0.972);
+}}
+
+.terminal-pane-shell.spawn-from-right {{
+  transform: translateX(72px) scale(0.972);
+}}
+
+.terminal-pane-shell.spawn-from-top {{
+  transform: translateY(-58px) scale(0.972);
+}}
+
+.terminal-pane-shell.spawn-from-bottom {{
+  transform: translateY(58px) scale(0.972);
+}}
+
+.terminal-pane-shell.spawn-overshoot-center {{
+  transform: scale(1.014);
+}}
+
+.terminal-pane-shell.spawn-overshoot-left {{
+  transform: translateX(14px) scale(1.006);
+}}
+
+.terminal-pane-shell.spawn-overshoot-right {{
+  transform: translateX(-14px) scale(1.006);
+}}
+
+.terminal-pane-shell.spawn-overshoot-top {{
+  transform: translateY(12px) scale(1.006);
+}}
+
+.terminal-pane-shell.spawn-overshoot-bottom {{
+  transform: translateY(-12px) scale(1.006);
+}}
+
+.terminal-pane-shell.close-kick-center {{
+  transform: scale(1.014);
+}}
+
+.terminal-pane-shell.close-kick-left {{
+  transform: translateX(-12px) scale(1.004);
+}}
+
+.terminal-pane-shell.close-kick-right {{
+  transform: translateX(12px) scale(1.004);
+}}
+
+.terminal-pane-shell.close-kick-top {{
+  transform: translateY(-10px) scale(1.004);
+}}
+
+.terminal-pane-shell.close-kick-bottom {{
+  transform: translateY(10px) scale(1.004);
+}}
+
 .terminal-pane-shell.pane-closing {{
   opacity: 0.0;
-  transform: translateY(10px) scale(0.975);
   box-shadow:
-    0 8px 20px rgba(0, 0, 0, 0.12),
+    0 10px 28px rgba(0, 0, 0, 0.16),
     inset 0 1px 0 rgba(255, 255, 255, 0.00);
+}}
+
+.terminal-pane-shell.pane-closing.close-to-center {{
+  transform: scale(0.952);
+}}
+
+.terminal-pane-shell.pane-closing.close-to-left {{
+  transform: translateX(-86px) scale(0.964);
+}}
+
+.terminal-pane-shell.pane-closing.close-to-right {{
+  transform: translateX(86px) scale(0.964);
+}}
+
+.terminal-pane-shell.pane-closing.close-to-top {{
+  transform: translateY(-68px) scale(0.964);
+}}
+
+.terminal-pane-shell.pane-closing.close-to-bottom {{
+  transform: translateY(68px) scale(0.964);
 }}
 
 .terminal-pane-shell.output-pulse {{
@@ -285,11 +395,11 @@ window {{
 }}
 
 .terminal-pane-shell.compact {{
-  border-radius: 16px;
+  border-radius: 15px;
 }}
 
 .terminal-pane-shell.dense {{
-  border-radius: 14px;
+  border-radius: 13px;
 }}
 
 .terminal-pane-shell.drag-source {{
@@ -299,30 +409,32 @@ window {{
 .terminal-pane-shell.drop-target {{
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, 0.06),
-    0 0 36px rgba(185, 140, 255, 0.24);
+    0 0 40px {accent_glow};
 }}
 
 .pane-ambient {{
   background:
-    radial-gradient(circle at 18% 0%, rgba(170, 118, 255, 0.22), transparent 32%),
-    radial-gradient(circle at 100% 78%, rgba(255, 126, 169, 0.10), transparent 25%),
-    linear-gradient(180deg, rgba(14, 11, 25, 0.64), rgba(12, 10, 21, 0.82));
+    radial-gradient(circle at 12% 0%, rgba(255, 255, 255, 0.08), transparent 24%),
+    radial-gradient(circle at 100% 80%, {accent_glow}, transparent 24%),
+    linear-gradient(180deg, rgba(10, 10, 14, 0.18), rgba(8, 9, 12, 0.34));
 }}
 
 .pane-wallpaper {{
-  opacity: 0.0;
+  opacity: 0.42;
 }}
 
 .terminal-pane-shell.compact .pane-wallpaper {{
-  opacity: 0.0;
+  opacity: 0.30;
 }}
 
 .terminal-pane-shell.dense .pane-wallpaper {{
-  opacity: 0.0;
+  opacity: 0.18;
 }}
 
 .pane-tint {{
-  background: rgba(9, 6, 18, 0.58);
+  background:
+    linear-gradient(180deg, rgba(8, 8, 12, 0.14), rgba(6, 6, 9, 0.26)),
+    {pane_tint};
 }}
 
 .pane-terminal-wrap {{
@@ -334,23 +446,24 @@ window {{
 }}
 
 .pane-chrome {{
-  padding: 12px 16px 10px;
+  padding: 10px 14px 9px;
   margin: 0;
-  border-top-left-radius: 19px;
-  border-top-right-radius: 19px;
-  border-bottom: 1px solid rgba(218, 175, 255, 0.14);
+  border-top-left-radius: 17px;
+  border-top-right-radius: 17px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   background:
-    linear-gradient(180deg, rgba(17, 12, 28, 0.96), rgba(15, 11, 24, 0.84));
-  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.03);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.016)),
+    {window_surface};
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.04);
   color: {foreground};
 }}
 
 .terminal-pane-shell.compact .pane-chrome {{
-  padding: 9px 12px 7px;
+  padding: 8px 11px 6px;
 }}
 
 .terminal-pane-shell.dense .pane-chrome {{
-  padding: 7px 10px 5px;
+  padding: 6px 9px 5px;
 }}
 
 .pane-title {{
@@ -366,8 +479,8 @@ window {{
 .context-badge {{
   padding: 3px 7px;
   border-radius: 999px;
-  border: 1px solid rgba(224, 188, 255, 0.12);
-  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.08);
   color: {foreground};
   font-size: 7.5pt;
   font-weight: 700;
@@ -380,32 +493,39 @@ window {{
 
 .palette-card {{
   min-width: 560px;
-  border-radius: 22px;
-  border: 1px solid rgba(224, 188, 255, 0.12);
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
   background:
-    radial-gradient(circle at top right, rgba(182, 136, 255, 0.08), transparent 34%),
-    linear-gradient(180deg, rgba(18, 13, 30, 0.98), rgba(11, 8, 20, 0.99));
-  box-shadow: 0 22px 58px rgba(0, 0, 0, 0.52);
+    radial-gradient(circle at top right, rgba(255, 255, 255, 0.07), transparent 34%),
+    linear-gradient(180deg, rgba(18, 18, 22, 0.985), rgba(12, 12, 16, 0.995));
+  box-shadow:
+    0 24px 64px rgba(0, 0, 0, 0.44),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
   padding: 14px;
 }}
 
 .palette-list {{
-  background: transparent;
+  background: rgba(16, 16, 20, 0.98);
+}}
+
+.palette-card searchentry {{
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(28, 28, 34, 0.99);
+  color: {foreground};
 }}
 
 .palette-row {{
   border-radius: 16px;
   margin: 3px 0;
-  border: 1px solid rgba(224, 188, 255, 0.06);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.026), rgba(255, 255, 255, 0.012));
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(30, 29, 36, 0.99);
   transition: background-color 140ms ease, border-color 140ms ease, transform 140ms ease;
 }}
 
 .palette-row:hover {{
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.046), rgba(255, 255, 255, 0.018));
-  border-color: rgba(224, 188, 255, 0.12);
+  background: rgba(41, 39, 48, 0.995);
+  border-color: rgba(255, 255, 255, 0.10);
 }}
 
 .palette-row:active {{
@@ -435,6 +555,11 @@ window {{
 .palette-row-prefix.section-workspace {{
   background: rgba(152, 245, 194, 0.10);
   color: rgba(178, 255, 214, 0.98);
+}}
+
+.palette-row-prefix.section-git {{
+  background: rgba(255, 167, 107, 0.12);
+  color: rgba(255, 205, 167, 0.99);
 }}
 
 .palette-row-prefix.section-commands {{
@@ -493,8 +618,8 @@ window {{
   margin: 6px 0;
   padding: 12px 14px;
   border-radius: 16px;
-  border: 1px dashed rgba(224, 188, 255, 0.12);
-  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed rgba(255, 255, 255, 0.10);
+  background: rgba(24, 24, 28, 0.99);
 }}
 
 .palette-empty-title {{
@@ -507,30 +632,36 @@ window {{
 }}
 
 .tile-paned > separator {{
-  background: rgba(216, 169, 255, 0.18);
-  min-width: 5px;
-  min-height: 5px;
+  background: rgba(255, 255, 255, 0.12);
+  min-width: 4px;
+  min-height: 4px;
   border-radius: 999px;
 }}
 
 .header-utility-button {{
   margin: 4px;
   border-radius: 999px;
-  border: 1px solid rgba(224, 188, 255, 0.08);
-  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
   color: {foreground};
 }}
 
 button.header-utility-button:hover {{
-  background: rgba(185, 140, 255, 0.12);
+  background: rgba(255, 255, 255, 0.10);
 }}
 
 {palette_css}
 "#,
         surface = util::rgba_to_css(&surface),
+        window_surface = util::rgba_to_css(&window_surface),
+        header_surface = util::rgba_to_css(&header_surface),
+        pane_tint = util::rgba_to_css(&pane_tint),
         active = util::rgba_to_css(&active),
+        active_glow = util::rgba_to_css(&active_glow),
+        active_border_glow = util::rgba_to_css(&active_border_glow),
         foreground = util::rgba_to_css(&foreground),
         accent = util::rgba_to_css(&accent),
+        accent_glow = util::rgba_to_css(&accent_glow),
         palette_css = palette_css,
     )
 }

@@ -7,7 +7,7 @@ use crate::preferences::{self, PreferenceCallbacks};
 use crate::quick_actions::{
     self, ActionTarget, InternalAction, QuickActionCommand, QuickActionItem, QuickActionSection,
 };
-use crate::terminal_pane::{PaneCallbacks, TerminalPane};
+use crate::terminal_pane::{PaneCallbacks, PaneSpawnMotion, TerminalPane};
 use crate::theme;
 use crate::util;
 use adw::prelude::*;
@@ -92,19 +92,16 @@ impl WindowState {
         about_button.add_css_class("header-utility-button");
         header.pack_end(&about_button);
 
-        let toast_overlay = adw::ToastOverlay::new();
         let root_overlay = gtk::Overlay::new();
         root_overlay.add_css_class("app-shell");
-        toast_overlay.set_child(Some(&root_overlay));
+        root_overlay.set_hexpand(true);
+        root_overlay.set_vexpand(true);
 
-        let toolbar_view = adw::ToolbarView::new();
-        toolbar_view.add_top_bar(&header);
-        toolbar_view.set_content(Some(&toast_overlay));
-
-        let layout_surface = gtk::Overlay::new();
-        layout_surface.add_css_class("layout-surface");
-        layout_surface.set_hexpand(true);
-        layout_surface.set_vexpand(true);
+        let window_surface = gtk::Overlay::new();
+        window_surface.add_css_class("window-surface");
+        window_surface.set_hexpand(true);
+        window_surface.set_vexpand(true);
+        root_overlay.set_child(Some(&window_surface));
 
         let shared_wallpaper = gtk::Picture::new();
         shared_wallpaper.add_css_class("shared-wallpaper");
@@ -112,21 +109,34 @@ impl WindowState {
         shared_wallpaper.set_can_shrink(true);
         shared_wallpaper.set_hexpand(true);
         shared_wallpaper.set_vexpand(true);
-        layout_surface.set_child(Some(&shared_wallpaper));
+        window_surface.set_child(Some(&shared_wallpaper));
 
         let shared_wallpaper_tint = gtk::Box::new(gtk::Orientation::Vertical, 0);
         shared_wallpaper_tint.add_css_class("shared-wallpaper-tint");
         shared_wallpaper_tint.set_hexpand(true);
         shared_wallpaper_tint.set_vexpand(true);
         shared_wallpaper_tint.set_can_target(false);
-        layout_surface.add_overlay(&shared_wallpaper_tint);
+        window_surface.add_overlay(&shared_wallpaper_tint);
 
-        root_overlay.set_child(Some(&layout_surface));
+        let toast_overlay = adw::ToastOverlay::new();
+        let toolbar_view = adw::ToolbarView::new();
+        toolbar_view.add_css_class("window-toolbar-view");
+        toolbar_view.add_top_bar(&header);
+        toolbar_view.set_content(Some(&toast_overlay));
+        toolbar_view.set_hexpand(true);
+        toolbar_view.set_vexpand(true);
+        window_surface.add_overlay(&toolbar_view);
+
+        let layout_surface = gtk::Overlay::new();
+        layout_surface.add_css_class("layout-surface");
+        layout_surface.set_hexpand(true);
+        layout_surface.set_vexpand(true);
+        toast_overlay.set_child(Some(&layout_surface));
 
         let layout_host = gtk::Box::new(gtk::Orientation::Vertical, 0);
         layout_host.set_hexpand(true);
         layout_host.set_vexpand(true);
-        layout_surface.add_overlay(&layout_host);
+        layout_surface.set_child(Some(&layout_host));
 
         let palette_revealer = gtk::Revealer::builder()
             .transition_type(if config.enable_animations {
@@ -138,13 +148,15 @@ impl WindowState {
             .build();
         palette_revealer.set_halign(gtk::Align::Center);
         palette_revealer.set_valign(gtk::Align::Start);
-        palette_revealer.set_margin_top(28);
+        palette_revealer.set_margin_top(74);
         root_overlay.add_overlay(&palette_revealer);
 
         let palette_card = gtk::Box::new(gtk::Orientation::Vertical, 10);
         palette_card.add_css_class("palette-card");
         let palette_search = gtk::SearchEntry::new();
-        palette_search.set_placeholder_text(Some("Quick actions, ssh, container, project..."));
+        palette_search.set_placeholder_text(Some(
+            "Acciones rápidas, ssh, contenedores, proyectos, git...",
+        ));
         let palette_scroller = gtk::ScrolledWindow::new();
         palette_scroller.set_min_content_height(340);
         palette_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -156,7 +168,7 @@ impl WindowState {
         palette_card.append(&palette_scroller);
         palette_revealer.set_child(Some(&palette_card));
 
-        window.set_content(Some(&toolbar_view));
+        window.set_content(Some(&root_overlay));
 
         let state = Rc::new(Self {
             app,
@@ -326,7 +338,7 @@ impl WindowState {
             .set_accels_for_action("win.reload-config", &["<Alt>r"]);
         self.app.set_accels_for_action(
             "win.palette",
-            &["<Alt>space", constants::ALT_SPACE_FALLBACK],
+            &["<Alt>f", "<Alt>space", constants::ALT_SPACE_FALLBACK],
         );
 
         for index in 1..=9 {
@@ -358,6 +370,7 @@ impl WindowState {
             shell_path.clone(),
             cwd.clone(),
             self.config.borrow().show_startup_banner,
+            PaneSpawnMotion::Center,
             &self.config.borrow(),
             self.pane_callbacks(),
         );
@@ -497,6 +510,13 @@ impl WindowState {
             self.zoomed_pane.set(None);
         }
 
+        let close_motion = self
+            .layout
+            .borrow()
+            .leaf_edge_direction(pane_id)
+            .map(pane_motion_from_direction)
+            .unwrap_or(PaneSpawnMotion::Center);
+
         let fallback = if self.focused_pane.get() == Some(pane_id) {
             self.close_focus_candidate(pane_id)
                 .or_else(|| self.previous_focus_candidate(pane_id))
@@ -523,7 +543,7 @@ impl WindowState {
         if self.config.borrow().enable_animations {
             if let Some(pane) = self.panes.borrow().get(&pane_id).cloned() {
                 self.closing_panes.borrow_mut().insert(pane_id);
-                pane.begin_close_animation();
+                pane.begin_close_animation(&self.config.borrow(), close_motion);
                 let delay = pane.close_animation_duration_ms(&self.config.borrow()) + 24;
                 let weak = Rc::downgrade(self);
                 gtk::glib::timeout_add_local_once(Duration::from_millis(delay), move || {
@@ -621,7 +641,7 @@ impl WindowState {
             ));
         } else {
             self.title_widget.set_title(constants::APP_NAME);
-            self.title_widget.set_subtitle("No active pane");
+            self.title_widget.set_subtitle("Sin panel activo");
         }
     }
 
@@ -695,14 +715,14 @@ impl WindowState {
     fn copy_from_focused(&self) {
         if let Some(pane) = self.focused_pane_ref() {
             pane.terminal().copy_clipboard_format(vte::Format::Text);
-            self.show_toast("Copied from active pane");
+            self.show_toast("Copiado desde el panel activo");
         }
     }
 
     fn paste_into_focused(&self) {
         if let Some(pane) = self.focused_pane_ref() {
             pane.terminal().paste_clipboard();
-            self.show_toast("Pasted into active pane");
+            self.show_toast("Pegado en el panel activo");
         }
     }
 
@@ -728,11 +748,11 @@ impl WindowState {
 
         if self.zoomed_pane.get() == Some(pane_id) {
             self.zoomed_pane.set(None);
-            self.show_toast("Pane restored");
+            self.show_toast("Panel restaurado");
         } else {
             self.zoomed_pane.set(Some(pane_id));
             self.set_focused_pane(pane_id);
-            self.show_toast("Pane zoomed");
+            self.show_toast("Panel ampliado");
         }
         self.rebuild_layout();
     }
@@ -740,7 +760,7 @@ impl WindowState {
     fn show_info_banner(&self) {
         if let Some(pane) = self.focused_pane_ref() {
             pane.show_banner_info();
-            self.show_toast("System info rendered in active pane");
+            self.show_toast("Información del sistema renderizada en el panel activo");
         }
     }
 
@@ -776,7 +796,7 @@ impl WindowState {
             .version(constants::APP_VERSION)
             .website("https://github.com/Rodri040409/bspwm-VoidShell")
             .issue_url("https://github.com/Rodri040409/bspwm-VoidShell/issues")
-            .comments("VoidShell is a real GTK4/libadwaita/VTE terminal with tiling panes, contextual chrome and Fedora/GNOME-first UX.")
+            .comments("VoidShell es una terminal real hecha con GTK4, libadwaita y VTE, con paneles en mosaico, chrome contextual y una UX pensada primero para Fedora y GNOME.")
             .build();
         dialog.present(Some(&self.window));
     }
@@ -798,14 +818,14 @@ impl WindowState {
         }
         self.refresh_pane_density();
         if let Err(error) = self.config_manager.save(&config) {
-            self.show_toast(&format!("Failed to save preferences: {error}"));
+            self.show_toast(&format!("No se pudieron guardar las preferencias: {error}"));
         }
     }
 
     fn reload_config(&self) {
         let config = self.config_manager.load_or_default();
         self.update_config(config);
-        self.show_toast("Configuration reloaded");
+        self.show_toast("Configuración recargada");
     }
 
     fn end_session_for_pane(&self, pane_id: u64) {
@@ -832,7 +852,7 @@ impl WindowState {
 
     fn open_palette(self: &Rc<Self>) {
         if !self.config.borrow().enable_quick_actions {
-            self.show_toast("Quick actions are disabled in preferences");
+            self.show_toast("Las acciones rápidas están desactivadas en preferencias");
             return;
         }
 
@@ -882,13 +902,9 @@ impl WindowState {
             .collect();
 
         if !query.is_empty() {
-            let mut seen_ids = BTreeSet::new();
-            let mut dynamic = quick_actions::query_actions(&raw_query, context.as_ref());
-            dynamic.extend(filtered);
-            filtered = dynamic
-                .into_iter()
-                .filter(|item| seen_ids.insert(item.id.clone()))
-                .collect();
+            let dynamic = quick_actions::query_actions(&raw_query, context.as_ref());
+            filtered.extend(dynamic);
+            filtered = quick_actions::dedupe_items(filtered);
         }
 
         if filtered.is_empty() {
@@ -945,7 +961,7 @@ impl WindowState {
                 row.add_suffix(&label);
             }
             if matches!(item.target, ActionTarget::NewPane) {
-                let label = gtk::Label::new(Some("NEW"));
+                let label = gtk::Label::new(Some("NUEVO"));
                 label.add_css_class("palette-target-badge");
                 row.add_suffix(&label);
             }
@@ -969,7 +985,7 @@ impl WindowState {
                     uri.as_str(),
                     None::<&gio::AppLaunchContext>,
                 ) {
-                    self.show_toast(&format!("Failed to open directory: {error}"));
+                    self.show_toast(&format!("No se pudo abrir el directorio: {error}"));
                 }
             }
             QuickActionCommand::ChangeDirectory(path) => {
@@ -1017,7 +1033,7 @@ impl WindowState {
         self.persist_history();
         self.close_palette();
         if !matches!(item.command, QuickActionCommand::Internal(_)) {
-            self.show_toast(&format!("Ran {}", item.title));
+            self.show_toast(&format!("Se ejecutó {}", item.title));
         }
     }
 
@@ -1048,7 +1064,7 @@ impl WindowState {
         }
 
         self.shared_wallpaper_tint
-            .set_opacity((config.overlay_opacity * 0.52).clamp(0.16, 0.72));
+            .set_opacity((config.overlay_opacity * 0.38).clamp(0.08, 0.58));
     }
 
     fn execute_internal_action(self: &Rc<Self>, action: &InternalAction) {
@@ -1060,8 +1076,8 @@ impl WindowState {
                 if let Some(pane) = self.focused_pane_ref() {
                     pane.set_palette_preset(*preset, &self.config.borrow());
                     let message = preset
-                        .map(|preset| format!("Pane palette set to {}", preset.label()))
-                        .unwrap_or_else(|| "Pane palette reset".to_string());
+                        .map(|preset| format!("Paleta del panel cambiada a {}", preset.label()))
+                        .unwrap_or_else(|| "Paleta del panel restablecida".to_string());
                     self.show_toast(&message);
                 }
             }
@@ -1188,7 +1204,7 @@ impl WindowState {
         if let Some(pane) = self.focused_pane_ref() {
             pane.focus_terminal();
         }
-        self.show_toast("Panes reordered");
+        self.show_toast("Paneles reordenados");
     }
 
     fn spawn_split(self: &Rc<Self>, current_id: u64, axis: SplitAxis, position: InsertPosition) {
@@ -1203,7 +1219,8 @@ impl WindowState {
             pane_id,
             shell_path.clone(),
             cwd.clone(),
-            false,
+            self.config.borrow().show_banner_on_new_panes,
+            pane_spawn_motion(axis, position),
             &self.config.borrow(),
             self.pane_callbacks(),
         );
@@ -1298,6 +1315,12 @@ impl WindowState {
 
         let _ = self.layout.borrow_mut().remove_leaf(pane_id);
 
+        if self.panes.borrow().is_empty() || self.layout.borrow().leaf_count() == 0 {
+            self.focused_pane.set(None);
+            self.window.close();
+            return;
+        }
+
         if self
             .focused_pane
             .get()
@@ -1345,8 +1368,26 @@ impl WindowState {
 
     fn persist_history(&self) {
         if let Err(error) = self.history_manager.save(&self.history.borrow()) {
-            self.show_toast(&format!("Failed to persist history: {error}"));
+            self.show_toast(&format!("No se pudo guardar el historial: {error}"));
         }
+    }
+}
+
+fn pane_spawn_motion(axis: SplitAxis, position: InsertPosition) -> PaneSpawnMotion {
+    match (axis, position) {
+        (SplitAxis::Vertical, InsertPosition::Before) => PaneSpawnMotion::FromLeft,
+        (SplitAxis::Vertical, InsertPosition::After) => PaneSpawnMotion::FromRight,
+        (SplitAxis::Horizontal, InsertPosition::Before) => PaneSpawnMotion::FromTop,
+        (SplitAxis::Horizontal, InsertPosition::After) => PaneSpawnMotion::FromBottom,
+    }
+}
+
+fn pane_motion_from_direction(direction: Direction) -> PaneSpawnMotion {
+    match direction {
+        Direction::Left => PaneSpawnMotion::FromLeft,
+        Direction::Right => PaneSpawnMotion::FromRight,
+        Direction::Up => PaneSpawnMotion::FromTop,
+        Direction::Down => PaneSpawnMotion::FromBottom,
     }
 }
 
@@ -1412,7 +1453,7 @@ fn build_palette_empty_row(empty_query: bool) -> gtk::ListBoxRow {
     title.set_xalign(0.0);
 
     let subtitle = gtk::Label::new(Some(if empty_query {
-        "Activa quick actions o abre un panel con más contexto."
+        "Activa las acciones rápidas o abre un panel con más contexto."
     } else {
         "Prueba otro texto o usa prefijos como `:theme`, `:swap` o una ruta."
     }));

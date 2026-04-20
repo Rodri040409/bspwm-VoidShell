@@ -39,16 +39,16 @@ impl SystemInfo {
         }
 
         let collected = Self {
-            distro: util::platform_display_name().unwrap_or_else(|| "Unknown distro".to_string()),
-            kernel: util::kernel_release().unwrap_or_else(|| "Unknown kernel".to_string()),
+            distro: util::platform_display_name().unwrap_or_else(|| "Distro desconocida".to_string()),
+            kernel: util::kernel_release().unwrap_or_else(|| "Kernel desconocido".to_string()),
             gnome: util::command_output("gnome-shell", &["--version"])
                 .or_else(|| util::command_output("gnome-session", &["--version"]))
-                .unwrap_or_else(|| "GNOME version unavailable".to_string()),
-            cpu: util::cpu_description().unwrap_or_else(|| "Unknown CPU".to_string()),
-            ram: util::mem_total_gib_portable().unwrap_or_else(|| "Unknown RAM".to_string()),
-            gpu: detect_gpu().unwrap_or_else(|| "GPU not detected".to_string()),
-            local_ip: util::primary_local_ip().unwrap_or_else(|| "Unavailable".to_string()),
-            public_ip: util::cached_public_ip(900).unwrap_or_else(|| "Unavailable".to_string()),
+                .unwrap_or_else(|| "Versión de GNOME no disponible".to_string()),
+            cpu: util::cpu_description().unwrap_or_else(|| "CPU desconocida".to_string()),
+            ram: util::mem_total_gib_portable().unwrap_or_else(|| "RAM desconocida".to_string()),
+            gpu: detect_gpu().unwrap_or_else(|| "GPU no detectada".to_string()),
+            local_ip: util::primary_local_ip().unwrap_or_else(|| "No disponible".to_string()),
+            public_ip: util::cached_public_ip(900).unwrap_or_else(|| "No disponible".to_string()),
             hostname: util::hostname(),
             shell: util::shell_name(shell_path),
         };

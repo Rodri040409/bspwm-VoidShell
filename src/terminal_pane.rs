@@ -1,5 +1,5 @@
 use crate::banner;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, BannerInfoLayout};
 use crate::constants;
 use crate::context::{self, PanelContext, PanelMode};
 use crate::theme;
@@ -22,6 +22,15 @@ pub struct PaneCallbacks {
     pub on_notification: Rc<dyn Fn(String)>,
     pub on_swap_request: Rc<dyn Fn(u64, u64)>,
     pub on_toggle_zoom: Rc<dyn Fn(u64)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneSpawnMotion {
+    Center,
+    FromLeft,
+    FromRight,
+    FromTop,
+    FromBottom,
 }
 
 pub struct TerminalPane {
@@ -50,6 +59,7 @@ pub struct TerminalPane {
     wallpaper_hint: Cell<bool>,
     wallpaper_available: Cell<bool>,
     show_context_bar: Cell<bool>,
+    banner_layout: Cell<BannerInfoLayout>,
     palette_preset: Cell<Option<theme::PanePalettePreset>>,
 }
 
@@ -59,6 +69,7 @@ impl TerminalPane {
         shell_path: String,
         working_directory: Option<PathBuf>,
         show_banner: bool,
+        spawn_motion: PaneSpawnMotion,
         config: &AppConfig,
         callbacks: PaneCallbacks,
     ) -> Rc<Self> {
@@ -181,6 +192,7 @@ impl TerminalPane {
             wallpaper_hint: Cell::new(true),
             wallpaper_available: Cell::new(false),
             show_context_bar: Cell::new(true),
+            banner_layout: Cell::new(BannerInfoLayout::Right),
             palette_preset: Cell::new(None),
         });
 
@@ -189,7 +201,7 @@ impl TerminalPane {
         pane.install_drag_handlers();
         pane.install_runtime_handlers();
         pane.spawn_shell(working_directory, show_banner);
-        pane.animate_open(config);
+        pane.animate_open(config, spawn_motion);
         pane.schedule_context_refresh();
 
         let reveal = pane.revealer.clone();
@@ -254,39 +266,29 @@ impl TerminalPane {
     }
 
     pub fn show_banner_info(&self) {
-        let rendered = banner::startup_payload_for_columns(
-            &self.shell_path,
-            Some(self.terminal.column_count() as usize),
-        );
-
-        let shell = util::shell_name(&self.shell_path).to_ascii_lowercase();
-        let rendered_via_shell = self.child_pid.get().is_some()
-            && matches!(shell.as_str(), "bash" | "rbash")
-            && util::write_live_banner(&rendered).is_some();
-
-        if rendered_via_shell {
-            self.terminal.feed_child(&[0x07]);
-        } else {
-            let mut payload = String::from("\r\n");
-            payload.push_str(&rendered.replace('\n', "\r\n"));
-            payload.push_str("\r\n");
-            self.terminal.feed(payload.as_bytes());
-            if self.child_pid.get().is_some() {
-                self.terminal.feed_child(b"\n");
-            }
-        }
-
+        self.render_banner(true, true);
         self.focus_terminal();
-        self.flash_action();
     }
 
-    pub fn begin_close_animation(&self) {
-        self.shell_box.add_css_class("pane-closing");
-        self.revealer.set_reveal_child(false);
+    pub fn begin_close_animation(&self, config: &AppConfig, motion: PaneSpawnMotion) {
+        self.clear_spawn_motion_classes();
+        self.clear_close_motion_classes();
+
+        let kick_class = motion.close_kick_css_class();
+        let exit_class = motion.close_css_class();
+        self.shell_box.add_css_class(kick_class);
+
+        let shell_box = self.shell_box.clone();
+        let kick_delay = ((44.0 / config.animation_speed.max(0.2)) as u64).max(1);
+        gtk::glib::timeout_add_local_once(Duration::from_millis(kick_delay), move || {
+            shell_box.remove_css_class(kick_class);
+            shell_box.add_css_class("pane-closing");
+            shell_box.add_css_class(exit_class);
+        });
     }
 
     pub fn close_animation_duration_ms(&self, config: &AppConfig) -> u64 {
-        ((180.0 / config.animation_speed.max(0.2)) as u64).max(1)
+        ((300.0 / config.animation_speed.max(0.2)) as u64).max(1)
     }
 
     pub fn set_active(&self, active: bool) {
@@ -323,6 +325,7 @@ impl TerminalPane {
         self.terminal_wrap.set_margin_end(config.panel_padding);
 
         self.show_context_bar.set(config.show_context_bar);
+        self.banner_layout.set(config.banner_info_layout);
         self.chrome.set_visible(config.show_context_bar);
         self.tint
             .set_opacity(config.overlay_opacity.clamp(0.0, 0.95));
@@ -338,6 +341,15 @@ impl TerminalPane {
         self.wallpaper_available.set(false);
         self.background
             .set_paintable(Option::<&gtk::gdk::Texture>::None);
+        if let Some(path) = config
+            .wallpaper_path
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            && let Some(texture) = util::cached_wallpaper_texture(path)
+        {
+            self.background.set_paintable(Some(&texture));
+            self.wallpaper_available.set(true);
+        }
 
         let font = theme::font_description(config);
         self.terminal.set_font(Some(&font));
@@ -503,21 +515,8 @@ impl TerminalPane {
         let env_strings = util::envv(&self.shell_path);
         let env_refs: Vec<&str> = env_strings.iter().map(String::as_str).collect();
         let shell_args = util::default_shell_args(&self.shell_path);
-
-        let argv_strings = if show_banner {
-            let mut argv = vec![
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                banner::shell_wrapper_script(&self.shell_path),
-                self.shell_path.clone(),
-            ];
-            argv.extend(shell_args.clone());
-            argv
-        } else {
-            let mut argv = vec![self.shell_path.clone()];
-            argv.extend(shell_args);
-            argv
-        };
+        let mut argv_strings = vec![self.shell_path.clone()];
+        argv_strings.extend(shell_args);
         let argv_refs: Vec<&str> = argv_strings.iter().map(String::as_str).collect();
         let working_directory_string = working_directory
             .as_ref()
@@ -538,6 +537,9 @@ impl TerminalPane {
                     match result {
                         Ok(pid) => {
                             pane.child_pid.set(Some(pid));
+                            if show_banner {
+                                pane.render_banner(false, false);
+                            }
                             let mut commands = pane.pending_commands.borrow_mut();
                             for command in commands.drain(..) {
                                 pane.terminal.feed_child(command.as_bytes());
@@ -631,12 +633,30 @@ impl TerminalPane {
         });
     }
 
-    fn animate_open(&self, config: &AppConfig) {
+    fn animate_open(&self, config: &AppConfig, motion: PaneSpawnMotion) {
         self.shell_box.add_css_class("pane-born");
+        self.clear_spawn_motion_classes();
+        self.clear_close_motion_classes();
+        self.shell_box.remove_css_class("pane-closing");
+
+        let start_class = motion.start_css_class();
+        let overshoot_class = motion.overshoot_css_class();
+        self.shell_box.add_css_class(start_class);
+
         let shell_box = self.shell_box.clone();
-        let duration = ((360.0 / config.animation_speed.max(0.2)) as u64).max(1);
+        let settle_delay = ((92.0 / config.animation_speed.max(0.2)) as u64).max(1);
+        gtk::glib::timeout_add_local_once(Duration::from_millis(settle_delay), move || {
+            shell_box.remove_css_class("pane-born");
+            shell_box.remove_css_class(start_class);
+            shell_box.add_css_class(overshoot_class);
+        });
+
+        let shell_box = self.shell_box.clone();
+        let duration = ((340.0 / config.animation_speed.max(0.2)) as u64).max(1);
         gtk::glib::timeout_add_local_once(Duration::from_millis(duration), move || {
             shell_box.remove_css_class("pane-born");
+            shell_box.remove_css_class(start_class);
+            shell_box.remove_css_class(overshoot_class);
         });
     }
 
@@ -690,6 +710,73 @@ impl TerminalPane {
         self.terminal.set_enable_shaping(!dense);
     }
 
+    fn render_banner(&self, focus_terminal: bool, flash: bool) {
+        let columns = self.terminal.column_count().max(1) as usize;
+        let rendered = banner::startup_payload_for_columns(
+            &self.shell_path,
+            Some(columns),
+            self.banner_layout.get(),
+        );
+
+        let shell = util::shell_name(&self.shell_path).to_ascii_lowercase();
+        let rendered_via_shell = self.child_pid.get().is_some()
+            && matches!(shell.as_str(), "bash" | "rbash")
+            && util::write_live_banner(&rendered).is_some();
+
+        if rendered_via_shell {
+            self.terminal.feed_child(&[0x07]);
+        } else {
+            let mut payload = String::from("\r\n");
+            payload.push_str(&rendered.replace('\n', "\r\n"));
+            payload.push_str("\r\n");
+            self.terminal.feed(payload.as_bytes());
+            if self.child_pid.get().is_some() {
+                self.terminal.feed_child(b"\n");
+            }
+        }
+
+        if focus_terminal {
+            self.focus_terminal();
+        }
+        if flash {
+            self.flash_action();
+        }
+    }
+
+    fn clear_spawn_motion_classes(&self) {
+        for class_name in [
+            "spawn-from-center",
+            "spawn-from-left",
+            "spawn-from-right",
+            "spawn-from-top",
+            "spawn-from-bottom",
+            "spawn-overshoot-center",
+            "spawn-overshoot-left",
+            "spawn-overshoot-right",
+            "spawn-overshoot-top",
+            "spawn-overshoot-bottom",
+        ] {
+            self.shell_box.remove_css_class(class_name);
+        }
+    }
+
+    fn clear_close_motion_classes(&self) {
+        for class_name in [
+            "close-kick-center",
+            "close-kick-left",
+            "close-kick-right",
+            "close-kick-top",
+            "close-kick-bottom",
+            "close-to-center",
+            "close-to-left",
+            "close-to-right",
+            "close-to-top",
+            "close-to-bottom",
+        ] {
+            self.shell_box.remove_css_class(class_name);
+        }
+    }
+
     fn context_refresh_delay_ms(&self) -> u64 {
         if self.child_pid.get().is_none() {
             return constants::CONTEXT_REFRESH_MS * 4;
@@ -699,6 +786,48 @@ impl TerminalPane {
             constants::CONTEXT_REFRESH_MS
         } else {
             constants::CONTEXT_REFRESH_MS * 4
+        }
+    }
+}
+
+impl PaneSpawnMotion {
+    fn start_css_class(self) -> &'static str {
+        match self {
+            Self::Center => "spawn-from-center",
+            Self::FromLeft => "spawn-from-left",
+            Self::FromRight => "spawn-from-right",
+            Self::FromTop => "spawn-from-top",
+            Self::FromBottom => "spawn-from-bottom",
+        }
+    }
+
+    fn overshoot_css_class(self) -> &'static str {
+        match self {
+            Self::Center => "spawn-overshoot-center",
+            Self::FromLeft => "spawn-overshoot-left",
+            Self::FromRight => "spawn-overshoot-right",
+            Self::FromTop => "spawn-overshoot-top",
+            Self::FromBottom => "spawn-overshoot-bottom",
+        }
+    }
+
+    fn close_kick_css_class(self) -> &'static str {
+        match self {
+            Self::Center => "close-kick-center",
+            Self::FromLeft => "close-kick-right",
+            Self::FromRight => "close-kick-left",
+            Self::FromTop => "close-kick-bottom",
+            Self::FromBottom => "close-kick-top",
+        }
+    }
+
+    fn close_css_class(self) -> &'static str {
+        match self {
+            Self::Center => "close-to-center",
+            Self::FromLeft => "close-to-left",
+            Self::FromRight => "close-to-right",
+            Self::FromTop => "close-to-top",
+            Self::FromBottom => "close-to-bottom",
         }
     }
 }

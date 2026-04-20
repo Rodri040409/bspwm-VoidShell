@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, CursorStyle};
+use crate::config::{AppConfig, BannerInfoLayout, CursorStyle};
 use adw::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -21,22 +21,22 @@ pub fn build_dialog(
     };
 
     let dialog = adw::PreferencesDialog::new();
-    dialog.set_title("Preferences");
+    dialog.set_title("Preferencias");
     dialog.set_search_enabled(true);
 
     let appearance = adw::PreferencesPage::builder()
         .name("appearance")
-        .title("Appearance")
+        .title("Apariencia")
         .icon_name("preferences-desktop-theme-symbolic")
         .build();
 
     let visuals = adw::PreferencesGroup::builder()
-        .title("Visual Identity")
-        .description("Wallpaper, chrome and typography.")
+        .title("Identidad visual")
+        .description("Fondo, chrome y tipografía.")
         .build();
 
     let wallpaper_row = adw::EntryRow::builder()
-        .title("Wallpaper")
+        .title("Fondo de pantalla")
         .text(shared.borrow().wallpaper_path.clone().unwrap_or_default())
         .build();
     let browse = gtk::Button::from_icon_name("folder-open-symbolic");
@@ -45,14 +45,14 @@ pub fn build_dialog(
     visuals.add(&wallpaper_row);
 
     let overlay_row = adw::SpinRow::with_range(0.0, 0.95, 0.05);
-    overlay_row.set_title("Dark overlay opacity");
-    overlay_row.set_subtitle("Higher values improve readability over wallpaper.");
+    overlay_row.set_title("Opacidad del overlay");
+    overlay_row.set_subtitle("Valores más altos mejoran la legibilidad sobre el fondo.");
     overlay_row.set_value(shared.borrow().overlay_opacity);
     visuals.add(&overlay_row);
 
     let font_dialog = gtk::FontDialog::builder()
         .modal(true)
-        .title("Select terminal font")
+        .title("Seleccionar fuente de la terminal")
         .build();
     let font_button = gtk::FontDialogButton::new(Some(font_dialog));
     font_button.set_use_font(true);
@@ -63,22 +63,22 @@ pub fn build_dialog(
         shared.borrow().font_size
     )));
     let font_row = adw::ActionRow::builder()
-        .title("Terminal font")
-        .subtitle("Distinctive monospace family for the VTE surface.")
+        .title("Fuente de la terminal")
+        .subtitle("Familia monoespaciada principal para la superficie VTE.")
         .build();
     font_row.add_suffix(&font_button);
     visuals.add(&font_row);
 
     let font_size_row = adw::SpinRow::with_range(8.0, 28.0, 1.0);
-    font_size_row.set_title("Font size");
+    font_size_row.set_title("Tamaño de fuente");
     font_size_row.set_value(shared.borrow().font_size as f64);
     visuals.add(&font_size_row);
 
     let cursor_row = adw::ActionRow::builder()
-        .title("Cursor style")
-        .subtitle("VTE-supported cursor shapes.")
+        .title("Estilo del cursor")
+        .subtitle("Formas de cursor compatibles con VTE.")
         .build();
-    let cursor_dropdown = gtk::DropDown::from_strings(&["Block", "I-Beam", "Underline"]);
+    let cursor_dropdown = gtk::DropDown::from_strings(&["Bloque", "Barra", "Subrayado"]);
     cursor_dropdown.set_selected(match shared.borrow().cursor_style {
         CursorStyle::Block => 0,
         CursorStyle::IBeam => 1,
@@ -90,7 +90,7 @@ pub fn build_dialog(
 
     let accent_dialog = gtk::ColorDialog::builder()
         .modal(true)
-        .title("Accent color")
+        .title("Color de acento")
         .build();
     let accent_button = gtk::ColorDialogButton::new(Some(accent_dialog));
     accent_button.set_rgba(&crate::util::parse_rgba(
@@ -98,15 +98,15 @@ pub fn build_dialog(
         "#7dc8ff",
     ));
     let accent_row = adw::ActionRow::builder()
-        .title("Accent color")
-        .subtitle("Used in badges, cursor and action glow.")
+        .title("Color de acento")
+        .subtitle("Se usa en badges, cursor y brillo de acciones.")
         .build();
     accent_row.add_suffix(&accent_button);
     visuals.add(&accent_row);
 
     let surface_dialog = gtk::ColorDialog::builder()
         .modal(true)
-        .title("Surface color")
+        .title("Color de superficie")
         .build();
     let surface_button = gtk::ColorDialogButton::new(Some(surface_dialog));
     surface_button.set_rgba(&crate::util::parse_rgba(
@@ -114,15 +114,15 @@ pub fn build_dialog(
         "#0d1117",
     ));
     let surface_row = adw::ActionRow::builder()
-        .title("Surface color")
-        .subtitle("Backdrop tint for chrome and terminal surfaces.")
+        .title("Color de superficie")
+        .subtitle("Tinte base para el chrome y las superficies de la terminal.")
         .build();
     surface_row.add_suffix(&surface_button);
     visuals.add(&surface_row);
 
     let foreground_dialog = gtk::ColorDialog::builder()
         .modal(true)
-        .title("Foreground color")
+        .title("Color de primer plano")
         .build();
     let foreground_button = gtk::ColorDialogButton::new(Some(foreground_dialog));
     foreground_button.set_rgba(&crate::util::parse_rgba(
@@ -130,15 +130,15 @@ pub fn build_dialog(
         "#edf3ff",
     ));
     let foreground_row = adw::ActionRow::builder()
-        .title("Foreground color")
-        .subtitle("Base terminal foreground tone.")
+        .title("Color de primer plano")
+        .subtitle("Tono base del texto de la terminal.")
         .build();
     foreground_row.add_suffix(&foreground_button);
     visuals.add(&foreground_row);
 
     let border_dialog = gtk::ColorDialog::builder()
         .modal(true)
-        .title("Active border color")
+        .title("Color del borde activo")
         .build();
     let border_button = gtk::ColorDialogButton::new(Some(border_dialog));
     border_button.set_rgba(&crate::util::parse_rgba(
@@ -146,29 +146,29 @@ pub fn build_dialog(
         "#66bfff",
     ));
     let border_row = adw::ActionRow::builder()
-        .title("Active border color")
-        .subtitle("Focus line for the current pane.")
+        .title("Color del borde activo")
+        .subtitle("Línea de foco para el panel actual.")
         .build();
     border_row.add_suffix(&border_button);
     visuals.add(&border_row);
 
     let metrics = adw::PreferencesGroup::builder()
-        .title("Density")
-        .description("Scrollback, padding and layout chrome.")
+        .title("Densidad")
+        .description("Scrollback, padding y chrome del layout.")
         .build();
 
     let padding_row = adw::SpinRow::with_range(0.0, 40.0, 1.0);
-    padding_row.set_title("Pane padding");
+    padding_row.set_title("Padding del panel");
     padding_row.set_value(shared.borrow().panel_padding as f64);
     metrics.add(&padding_row);
 
     let border_width_row = adw::SpinRow::with_range(1.0, 8.0, 1.0);
-    border_width_row.set_title("Active border width");
+    border_width_row.set_title("Grosor del borde activo");
     border_width_row.set_value(shared.borrow().active_border_width as f64);
     metrics.add(&border_width_row);
 
     let scrollback_row = adw::SpinRow::with_range(1000.0, 500000.0, 1000.0);
-    scrollback_row.set_title("Scrollback size");
+    scrollback_row.set_title("Tamaño del scrollback");
     scrollback_row.set_value(shared.borrow().scrollback_lines as f64);
     metrics.add(&scrollback_row);
 
@@ -178,68 +178,88 @@ pub fn build_dialog(
 
     let behavior = adw::PreferencesPage::builder()
         .name("behavior")
-        .title("Behavior")
+        .title("Comportamiento")
         .icon_name("preferences-system-symbolic")
         .build();
 
     let runtime = adw::PreferencesGroup::builder()
-        .title("Runtime")
-        .description("Startup, animation and productivity helpers.")
+        .title("Ejecución")
+        .description("Inicio, animaciones y ayudas de productividad.")
         .build();
 
     let shell_row = adw::EntryRow::builder()
-        .title("Shell executable")
+        .title("Ejecutable del shell")
         .text(shared.borrow().shell_path.clone())
         .build();
     shell_row.set_show_apply_button(true);
     shell_row.set_input_hints(gtk::InputHints::NO_SPELLCHECK);
     shell_row.set_input_purpose(gtk::InputPurpose::Url);
     shell_row.set_tooltip_text(Some(
-        "Leave empty to auto-detect. You can point this to bash, zsh, fish, pwsh, PowerShell, cmd, etc.",
+        "Déjalo vacío para detectar automáticamente. Puedes apuntar a bash, zsh, fish, pwsh, PowerShell, cmd, etc.",
     ));
     runtime.add(&shell_row);
 
     let banner_row = adw::SwitchRow::builder()
-        .title("Startup banner")
-        .subtitle("Print system info plus the launch banner on the first pane.")
+        .title("Banner de inicio")
+        .subtitle("Imprime la info del sistema y el banner de arranque en el primer panel.")
         .active(shared.borrow().show_startup_banner)
         .build();
     runtime.add(&banner_row);
 
+    let split_banner_row = adw::SwitchRow::builder()
+        .title("Banner en paneles nuevos")
+        .subtitle("Renderiza el banner ASCII del sistema cada vez que creas otro panel.")
+        .active(shared.borrow().show_banner_on_new_panes)
+        .build();
+    runtime.add(&split_banner_row);
+
+    let banner_layout_row = adw::ActionRow::builder()
+        .title("Posición de la info del banner")
+        .subtitle("Mantén la info del sistema a la derecha del ASCII o muévela abajo.")
+        .build();
+    let banner_layout_dropdown = gtk::DropDown::from_strings(&["A la derecha del ASCII", "Debajo del ASCII"]);
+    banner_layout_dropdown.set_selected(match shared.borrow().banner_info_layout {
+        BannerInfoLayout::Right => 0,
+        BannerInfoLayout::Below => 1,
+    });
+    banner_layout_row.add_suffix(&banner_layout_dropdown);
+    banner_layout_row.set_activatable_widget(Some(&banner_layout_dropdown));
+    runtime.add(&banner_layout_row);
+
     let animations_row = adw::SwitchRow::builder()
-        .title("Animations")
-        .subtitle("Enable focus, overlay and pane reveal transitions.")
+        .title("Animaciones")
+        .subtitle("Activa transiciones de foco, overlay y aparición de paneles.")
         .active(shared.borrow().enable_animations)
         .build();
     runtime.add(&animations_row);
 
     let animation_speed_row = adw::SpinRow::with_range(0.2, 2.0, 0.1);
-    animation_speed_row.set_title("Animation speed");
+    animation_speed_row.set_title("Velocidad de animación");
     animation_speed_row.set_value(shared.borrow().animation_speed);
     runtime.add(&animation_speed_row);
 
     let context_row = adw::SwitchRow::builder()
-        .title("Context chrome")
-        .subtitle("Show per-pane path, host and mode badges.")
+        .title("Chrome contextual")
+        .subtitle("Muestra por panel la ruta, el host y las badges de modo.")
         .active(shared.borrow().show_context_bar)
         .build();
     runtime.add(&context_row);
 
     let quick_actions_row = adw::SwitchRow::builder()
-        .title("Quick actions")
-        .subtitle("Enable the command palette and action history.")
+        .title("Acciones rápidas")
+        .subtitle("Activa la paleta de comandos y el historial de acciones.")
         .active(shared.borrow().enable_quick_actions)
         .build();
     runtime.add(&quick_actions_row);
 
     let reload_row = adw::ActionRow::builder()
-        .title("Reload configuration")
-        .subtitle("Re-read the config file from disk.")
+        .title("Recargar configuración")
+        .subtitle("Vuelve a leer el archivo de configuración desde disco.")
         .build();
-    let reload_button = gtk::Button::with_label("Reload");
+    let reload_button = gtk::Button::with_label("Recargar");
     reload_button.add_css_class("suggested-action");
     reload_row.add_suffix(&reload_button);
-    let utilities = adw::PreferencesGroup::builder().title("Utilities").build();
+    let utilities = adw::PreferencesGroup::builder().title("Utilidades").build();
     utilities.add(&reload_row);
     behavior.add(&runtime);
     behavior.add(&utilities);
@@ -260,7 +280,7 @@ pub fn build_dialog(
         let wallpaper_row = wallpaper_row.clone();
         browse.connect_clicked(move |_| {
             let dialog = gtk::FileDialog::builder()
-                .title("Select wallpaper")
+                .title("Seleccionar fondo de pantalla")
                 .modal(true)
                 .build();
             gtk::glib::MainContext::default().spawn_local({
@@ -335,6 +355,14 @@ pub fn build_dialog(
         },
     );
     connect_switch_row(
+        &split_banner_row,
+        shared.clone(),
+        notify.clone(),
+        |config, value| {
+            config.show_banner_on_new_panes = value;
+        },
+    );
+    connect_switch_row(
         &animations_row,
         shared.clone(),
         notify.clone(),
@@ -393,6 +421,18 @@ pub fn build_dialog(
                 1 => CursorStyle::IBeam,
                 2 => CursorStyle::Underline,
                 _ => CursorStyle::Block,
+            };
+            notify();
+        });
+    }
+
+    {
+        let shared = shared.clone();
+        let notify = notify.clone();
+        banner_layout_dropdown.connect_selected_notify(move |dropdown| {
+            shared.borrow_mut().banner_info_layout = match dropdown.selected() {
+                1 => BannerInfoLayout::Below,
+                _ => BannerInfoLayout::Right,
             };
             notify();
         });

@@ -140,6 +140,25 @@ impl TileTree {
         find_path(root, target, &mut path).then_some(path.len())
     }
 
+    pub fn leaf_edge_direction(&self, target: u64) -> Option<Direction> {
+        let root = self.root.as_ref()?;
+        let mut path = Vec::new();
+        if !find_path(root, target, &mut path) {
+            return None;
+        }
+
+        let side = *path.last()?;
+        let parent_path = &path[..path.len().saturating_sub(1)];
+        let (_, axis, _) = split_meta_at_path(root, parent_path)?;
+
+        match (axis, side) {
+            (SplitAxis::Vertical, ChildSide::First) => Some(Direction::Left),
+            (SplitAxis::Vertical, ChildSide::Second) => Some(Direction::Right),
+            (SplitAxis::Horizontal, ChildSide::First) => Some(Direction::Up),
+            (SplitAxis::Horizontal, ChildSide::Second) => Some(Direction::Down),
+        }
+    }
+
     pub fn remove_leaf(&mut self, target: u64) -> bool {
         fn collapse(node: &mut TileNode, target: u64) -> bool {
             match node {
