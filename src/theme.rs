@@ -383,6 +383,7 @@ window {{
   border-radius: 22px;
   border: 1px solid rgba(224, 188, 255, 0.12);
   background:
+    radial-gradient(circle at top right, rgba(182, 136, 255, 0.08), transparent 34%),
     linear-gradient(180deg, rgba(18, 13, 30, 0.98), rgba(11, 8, 20, 0.99));
   box-shadow: 0 22px 58px rgba(0, 0, 0, 0.52);
   padding: 14px;
@@ -393,8 +394,116 @@ window {{
 }}
 
 .palette-row {{
-  border-radius: 14px;
-  margin: 2px 0;
+  border-radius: 16px;
+  margin: 3px 0;
+  border: 1px solid rgba(224, 188, 255, 0.06);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.026), rgba(255, 255, 255, 0.012));
+  transition: background-color 140ms ease, border-color 140ms ease, transform 140ms ease;
+}}
+
+.palette-row:hover {{
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.046), rgba(255, 255, 255, 0.018));
+  border-color: rgba(224, 188, 255, 0.12);
+}}
+
+.palette-row:active {{
+  transform: scale(0.995);
+}}
+
+.palette-row-prefix {{
+  min-width: 32px;
+  min-height: 32px;
+  border-radius: 12px;
+  margin: 2px 2px 2px 0;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.04);
+  color: {foreground};
+}}
+
+.palette-row-prefix.section-suggested {{
+  background: rgba(139, 233, 255, 0.10);
+  color: rgba(162, 238, 255, 0.98);
+}}
+
+.palette-row-prefix.section-layout {{
+  background: rgba(185, 140, 255, 0.10);
+  color: rgba(217, 169, 255, 0.98);
+}}
+
+.palette-row-prefix.section-workspace {{
+  background: rgba(152, 245, 194, 0.10);
+  color: rgba(178, 255, 214, 0.98);
+}}
+
+.palette-row-prefix.section-commands {{
+  background: rgba(255, 215, 134, 0.10);
+  color: rgba(255, 230, 171, 0.98);
+}}
+
+.palette-row-prefix.section-remote {{
+  background: rgba(255, 126, 169, 0.10);
+  color: rgba(255, 159, 191, 0.98);
+}}
+
+.palette-row-prefix.section-theme {{
+  background: rgba(145, 210, 255, 0.10);
+  color: rgba(173, 223, 255, 0.98);
+}}
+
+.palette-row-prefix-icon {{
+  margin: auto;
+}}
+
+.palette-target-badge {{
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(139, 233, 255, 0.18);
+  background: rgba(139, 233, 255, 0.08);
+  color: rgba(173, 241, 255, 0.98);
+  font-size: 7.2pt;
+  font-weight: 800;
+}}
+
+.palette-section-row {{
+  margin: 10px 0 2px;
+  padding: 2px 4px;
+  background: transparent;
+}}
+
+.palette-section-icon {{
+  color: rgba(214, 186, 255, 0.88);
+}}
+
+.palette-section-label {{
+  color: rgba(229, 216, 255, 0.88);
+  font-size: 9pt;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+}}
+
+.palette-section-count {{
+  color: rgba(180, 165, 208, 0.78);
+  font-size: 8pt;
+  font-weight: 700;
+}}
+
+.palette-empty-row {{
+  margin: 6px 0;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px dashed rgba(224, 188, 255, 0.12);
+  background: rgba(255, 255, 255, 0.02);
+}}
+
+.palette-empty-title {{
+  color: rgba(241, 235, 255, 0.96);
+  font-weight: 800;
+}}
+
+.palette-empty-subtitle {{
+  color: rgba(188, 175, 212, 0.76);
 }}
 
 .tile-paned > separator {{

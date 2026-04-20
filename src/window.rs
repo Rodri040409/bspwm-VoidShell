@@ -5,7 +5,7 @@ use crate::history::{HistoryManager, HistoryStore};
 use crate::layout::{Direction, InsertPosition, SplitAxis, TileTree};
 use crate::preferences::{self, PreferenceCallbacks};
 use crate::quick_actions::{
-    self, ActionTarget, InternalAction, QuickActionCommand, QuickActionItem,
+    self, ActionTarget, InternalAction, QuickActionCommand, QuickActionItem, QuickActionSection,
 };
 use crate::terminal_pane::{PaneCallbacks, TerminalPane};
 use crate::theme;
@@ -891,16 +891,62 @@ impl WindowState {
                 .collect();
         }
 
-        for item in filtered {
+        if filtered.is_empty() {
+            self.palette_list
+                .append(&build_palette_empty_row(query.is_empty()));
+            return;
+        }
+
+        let mut ranked = filtered
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| {
+                (
+                    item.section,
+                    quick_actions::match_score(&item, &raw_query),
+                    index,
+                    item,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        ranked.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| left.2.cmp(&right.2))
+        });
+
+        let mut section_counts = BTreeMap::new();
+        for (section, _, _, _) in &ranked {
+            *section_counts.entry(*section).or_insert(0usize) += 1;
+        }
+
+        let mut current_section = None;
+        for (section, _, _, item) in ranked {
+            if current_section != Some(section) {
+                self.palette_list.append(&build_palette_section_row(
+                    section,
+                    *section_counts.get(&section).unwrap_or(&0),
+                ));
+                current_section = Some(section);
+            }
+
             let row = adw::ActionRow::builder()
                 .title(&item.title)
                 .subtitle(&item.subtitle)
                 .activatable(true)
                 .build();
             row.add_css_class("palette-row");
+            row.add_prefix(&build_palette_prefix(section));
             if let Some(badge) = &item.badge {
                 let label = gtk::Label::new(Some(badge));
                 label.add_css_class("context-badge");
+                row.add_suffix(&label);
+            }
+            if matches!(item.target, ActionTarget::NewPane) {
+                let label = gtk::Label::new(Some("NEW"));
+                label.add_css_class("palette-target-badge");
                 row.add_suffix(&label);
             }
 
@@ -1313,4 +1359,68 @@ fn center_of(rect: &gtk::graphene::Rect) -> (f32, f32) {
 
 fn overlap_span(start_a: f32, end_a: f32, start_b: f32, end_b: f32) -> f32 {
     (end_a.min(end_b) - start_a.max(start_b)).max(0.0)
+}
+
+fn build_palette_section_row(section: QuickActionSection, count: usize) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    row.set_activatable(false);
+    row.set_selectable(false);
+    row.add_css_class("palette-section-row");
+
+    let container = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let icon = gtk::Image::from_icon_name(section.icon_name());
+    icon.add_css_class("palette-section-icon");
+    let label = gtk::Label::new(Some(section.label()));
+    label.add_css_class("palette-section-label");
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let count_label = gtk::Label::new(Some(&count.to_string()));
+    count_label.add_css_class("palette-section-count");
+
+    container.append(&icon);
+    container.append(&label);
+    container.append(&count_label);
+    row.set_child(Some(&container));
+    row
+}
+
+fn build_palette_prefix(section: QuickActionSection) -> gtk::Box {
+    let wrapper = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    wrapper.add_css_class("palette-row-prefix");
+    wrapper.add_css_class(&format!("section-{}", section.css_class()));
+    wrapper.set_valign(gtk::Align::Center);
+
+    let icon = gtk::Image::from_icon_name(section.icon_name());
+    icon.add_css_class("palette-row-prefix-icon");
+    wrapper.append(&icon);
+    wrapper
+}
+
+fn build_palette_empty_row(empty_query: bool) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    row.set_activatable(false);
+    row.set_selectable(false);
+    row.add_css_class("palette-empty-row");
+
+    let container = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let title = gtk::Label::new(Some(if empty_query {
+        "No hay acciones disponibles"
+    } else {
+        "No hay coincidencias"
+    }));
+    title.add_css_class("palette-empty-title");
+    title.set_xalign(0.0);
+
+    let subtitle = gtk::Label::new(Some(if empty_query {
+        "Activa quick actions o abre un panel con más contexto."
+    } else {
+        "Prueba otro texto o usa prefijos como `:theme`, `:swap` o una ruta."
+    }));
+    subtitle.add_css_class("palette-empty-subtitle");
+    subtitle.set_xalign(0.0);
+
+    container.append(&title);
+    container.append(&subtitle);
+    row.set_child(Some(&container));
+    row
 }

@@ -29,9 +29,55 @@ pub enum InternalAction {
     SetPanePalette(Option<PanePalettePreset>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum QuickActionSection {
+    Suggested,
+    Layout,
+    Workspace,
+    Commands,
+    Remote,
+    Theme,
+}
+
+impl QuickActionSection {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Suggested => "Sugerencias",
+            Self::Layout => "Ventana y Panel",
+            Self::Workspace => "Workspace",
+            Self::Commands => "Comandos",
+            Self::Remote => "Remoto y Contenedores",
+            Self::Theme => "Tema y Color",
+        }
+    }
+
+    pub fn icon_name(self) -> &'static str {
+        match self {
+            Self::Suggested => "starred-symbolic",
+            Self::Layout => "view-grid-symbolic",
+            Self::Workspace => "folder-symbolic",
+            Self::Commands => "utilities-terminal-symbolic",
+            Self::Remote => "network-workgroup-symbolic",
+            Self::Theme => "applications-graphics-symbolic",
+        }
+    }
+
+    pub fn css_class(self) -> &'static str {
+        match self {
+            Self::Suggested => "suggested",
+            Self::Layout => "layout",
+            Self::Workspace => "workspace",
+            Self::Commands => "commands",
+            Self::Remote => "remote",
+            Self::Theme => "theme",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct QuickActionItem {
     pub id: String,
+    pub section: QuickActionSection,
     pub title: String,
     pub subtitle: String,
     pub badge: Option<String>,
@@ -48,6 +94,7 @@ pub fn collect_actions(
     if let Some(cwd) = context.and_then(|value| value.cwd.clone()) {
         items.push(QuickActionItem {
             id: "files-current".to_string(),
+            section: QuickActionSection::Workspace,
             title: "Open current directory in Files".to_string(),
             subtitle: cwd.display().to_string(),
             badge: Some("FILES".to_string()),
@@ -82,6 +129,7 @@ pub fn query_actions(query: &str, context: Option<&PanelContext>) -> Vec<QuickAc
         let path_string = expanded_path.display().to_string();
         items.push(QuickActionItem {
             id: format!("query-cd-{path_string}"),
+            section: QuickActionSection::Suggested,
             title: format!("cd {}", util::compact_label(&path_string)),
             subtitle: "Change the current pane working directory".to_string(),
             badge: Some("DIR".to_string()),
@@ -90,6 +138,7 @@ pub fn query_actions(query: &str, context: Option<&PanelContext>) -> Vec<QuickAc
         });
         items.push(QuickActionItem {
             id: format!("query-files-{path_string}"),
+            section: QuickActionSection::Suggested,
             title: format!("Open {}", util::compact_label(&path_string)),
             subtitle: "Reveal this directory in the file manager".to_string(),
             badge: Some("FILES".to_string()),
@@ -103,6 +152,7 @@ pub fn query_actions(query: &str, context: Option<&PanelContext>) -> Vec<QuickAc
     let title = freeform_title(query);
     items.push(QuickActionItem {
         id: format!("query-run-current-{query}"),
+        section: QuickActionSection::Suggested,
         title: format!("Run {title}"),
         subtitle: "Execute in the active pane".to_string(),
         badge: badge.clone(),
@@ -111,6 +161,7 @@ pub fn query_actions(query: &str, context: Option<&PanelContext>) -> Vec<QuickAc
     });
     items.push(QuickActionItem {
         id: format!("query-run-new-{query}"),
+        section: QuickActionSection::Suggested,
         title: format!("Run {title} in new pane"),
         subtitle: "Split and execute in a fresh pane".to_string(),
         badge,
@@ -162,6 +213,7 @@ fn built_in_actions() -> Vec<QuickActionItem> {
 
     items.push(QuickActionItem {
         id: "internal-info".to_string(),
+        section: QuickActionSection::Layout,
         title: "Show system info banner".to_string(),
         subtitle: "Print the ASCII banner and current system summary in this pane.".to_string(),
         badge: Some("INFO".to_string()),
@@ -171,6 +223,7 @@ fn built_in_actions() -> Vec<QuickActionItem> {
 
     items.push(QuickActionItem {
         id: "internal-zoom".to_string(),
+        section: QuickActionSection::Layout,
         title: "Toggle pane fullscreen".to_string(),
         subtitle: "Zoom the focused pane in place without fullscreening the window.".to_string(),
         badge: Some("LAYOUT".to_string()),
@@ -181,6 +234,7 @@ fn built_in_actions() -> Vec<QuickActionItem> {
     if let Some(editor) = first_available_command(&["nvim .", "vim .", "hx ."]) {
         items.push(QuickActionItem {
             id: "editor-here".to_string(),
+            section: QuickActionSection::Commands,
             title: format!("{} here", prettify_command(&editor)),
             subtitle: "Open an editor in the active working directory".to_string(),
             badge: Some("EDITOR".to_string()),
@@ -192,6 +246,7 @@ fn built_in_actions() -> Vec<QuickActionItem> {
     if let Some(monitor) = first_available_command(&["htop", "btop", "top"]) {
         items.push(QuickActionItem {
             id: "monitor-here".to_string(),
+            section: QuickActionSection::Commands,
             title: format!("{} here", prettify_command(&monitor)),
             subtitle: "Run a system monitor in the current pane".to_string(),
             badge: Some("MONITOR".to_string()),
@@ -200,6 +255,7 @@ fn built_in_actions() -> Vec<QuickActionItem> {
         });
         items.push(QuickActionItem {
             id: "monitor-new".to_string(),
+            section: QuickActionSection::Commands,
             title: format!("{} in new pane", prettify_command(&monitor)),
             subtitle: "Open a fresh monitoring pane".to_string(),
             badge: Some("MONITOR".to_string()),
@@ -211,6 +267,7 @@ fn built_in_actions() -> Vec<QuickActionItem> {
     if util::command_exists("git") {
         items.push(QuickActionItem {
             id: "git-status".to_string(),
+            section: QuickActionSection::Commands,
             title: "git status".to_string(),
             subtitle: "Inspect the current repository state".to_string(),
             badge: Some("GIT".to_string()),
@@ -240,6 +297,7 @@ fn ssh_host_actions() -> Vec<QuickActionItem> {
         .filter(|host| !host.contains('*') && !host.contains('?'))
         .map(|host| QuickActionItem {
             id: format!("ssh-{host}"),
+            section: QuickActionSection::Remote,
             title: format!("SSH {host}"),
             subtitle: "Launch a remote shell in a new pane".to_string(),
             badge: Some("SSH".to_string()),
@@ -259,6 +317,7 @@ fn container_actions(runtime: &str) -> Vec<QuickActionItem> {
         .filter(|name| !name.trim().is_empty())
         .map(|name| QuickActionItem {
             id: format!("{runtime}-{name}"),
+            section: QuickActionSection::Remote,
             title: format!("{runtime} shell {name}"),
             subtitle: format!("Attach /bin/sh in {name}"),
             badge: Some(runtime.to_ascii_uppercase()),
@@ -280,6 +339,7 @@ fn history_directory_actions(history: &HistoryStore) -> Vec<QuickActionItem> {
             let path = PathBuf::from(&entry.path);
             QuickActionItem {
                 id: format!("dir-{}", entry.path),
+                section: QuickActionSection::Workspace,
                 title: format!("Open {}", util::compact_label(&entry.path)),
                 subtitle: "Jump to a recent directory".to_string(),
                 badge: Some("DIR".to_string()),
@@ -299,6 +359,7 @@ fn history_project_actions(history: &HistoryStore) -> Vec<QuickActionItem> {
             let path = PathBuf::from(&entry.path);
             QuickActionItem {
                 id: format!("project-{}", entry.path),
+                section: QuickActionSection::Workspace,
                 title: format!("Project {}", util::compact_label(&entry.path)),
                 subtitle: "Open a recent Git project".to_string(),
                 badge: Some("PROJECT".to_string()),
@@ -316,6 +377,7 @@ fn history_action_actions(history: &HistoryStore) -> Vec<QuickActionItem> {
         .take(6)
         .map(|entry| QuickActionItem {
             id: format!("action-{}", entry.command),
+            section: QuickActionSection::Commands,
             title: format!("Repeat {}", entry.title),
             subtitle: entry.command.clone(),
             badge: infer_badge(&entry.command, None).or(Some("RECENT".to_string())),
@@ -332,6 +394,7 @@ fn history_command_actions(history: &HistoryStore) -> Vec<QuickActionItem> {
         .take(8)
         .map(|entry| QuickActionItem {
             id: format!("command-{}", entry.command),
+            section: QuickActionSection::Commands,
             title: entry.title.clone(),
             subtitle: entry.command.clone(),
             badge: Some(entry.category.clone()),
@@ -348,6 +411,7 @@ fn history_connection_actions(history: &HistoryStore) -> Vec<QuickActionItem> {
         .take(4)
         .map(|entry| QuickActionItem {
             id: format!("connection-{}", entry.command),
+            section: QuickActionSection::Remote,
             title: entry.label.clone(),
             subtitle: entry.command.clone(),
             badge: Some("CONNECTION".to_string()),
@@ -396,6 +460,7 @@ fn internal_query_actions(query: &str) -> Vec<QuickActionItem> {
     if matches!(command, "info" | "banner" | "fetch") {
         return vec![QuickActionItem {
             id: "query-internal-info".to_string(),
+            section: QuickActionSection::Suggested,
             title: "Show system info banner".to_string(),
             subtitle: "Print the current ASCII system info in the active pane.".to_string(),
             badge: Some("INFO".to_string()),
@@ -407,6 +472,7 @@ fn internal_query_actions(query: &str) -> Vec<QuickActionItem> {
     if matches!(command, "zoom" | "fullscreen" | "focus") {
         return vec![QuickActionItem {
             id: "query-internal-zoom".to_string(),
+            section: QuickActionSection::Suggested,
             title: "Toggle pane fullscreen".to_string(),
             subtitle: "Zoom or restore the focused pane.".to_string(),
             badge: Some("LAYOUT".to_string()),
@@ -418,6 +484,7 @@ fn internal_query_actions(query: &str) -> Vec<QuickActionItem> {
     if let Some(direction) = parse_directional_command(command, &["swap", "move"]) {
         return vec![QuickActionItem {
             id: format!("query-internal-swap-{direction:?}"),
+            section: QuickActionSection::Suggested,
             title: format!("Swap pane {}", direction_label(direction)),
             subtitle: "Exchange the active pane with its closest neighbor.".to_string(),
             badge: Some("LAYOUT".to_string()),
@@ -433,6 +500,7 @@ fn internal_query_actions(query: &str) -> Vec<QuickActionItem> {
         if matches!(theme_name, "default" | "reset" | "base") {
             return vec![QuickActionItem {
                 id: "query-theme-reset".to_string(),
+                section: QuickActionSection::Suggested,
                 title: "Reset pane palette".to_string(),
                 subtitle: "Restore the pane to the global terminal palette.".to_string(),
                 badge: Some("THEME".to_string()),
@@ -444,6 +512,7 @@ fn internal_query_actions(query: &str) -> Vec<QuickActionItem> {
         if let Some(preset) = PanePalettePreset::from_name(theme_name) {
             return vec![QuickActionItem {
                 id: format!("query-theme-{}", preset.slug()),
+                section: QuickActionSection::Suggested,
                 title: format!("Set pane palette to {}", preset.label()),
                 subtitle: "Apply a per-pane color preset.".to_string(),
                 badge: Some("THEME".to_string()),
@@ -461,6 +530,7 @@ fn palette_preset_actions() -> Vec<QuickActionItem> {
 
     items.push(QuickActionItem {
         id: "theme-reset".to_string(),
+        section: QuickActionSection::Theme,
         title: "Reset pane palette".to_string(),
         subtitle: "Return the active pane to the default palette.".to_string(),
         badge: Some("THEME".to_string()),
@@ -471,6 +541,7 @@ fn palette_preset_actions() -> Vec<QuickActionItem> {
     for preset in PanePalettePreset::ALL {
         items.push(QuickActionItem {
             id: format!("theme-{}", preset.slug()),
+            section: QuickActionSection::Theme,
             title: format!("Pane palette: {}", preset.label()),
             subtitle: "Apply a per-pane palette preset.".to_string(),
             badge: Some("THEME".to_string()),
@@ -516,4 +587,47 @@ fn direction_label(direction: Direction) -> &'static str {
         Direction::Up => "up",
         Direction::Down => "down",
     }
+}
+
+pub fn match_score(item: &QuickActionItem, query: &str) -> i32 {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return 0;
+    }
+
+    let title = item.title.to_ascii_lowercase();
+    let subtitle = item.subtitle.to_ascii_lowercase();
+    let badge = item
+        .badge
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    let mut score = 0;
+    if title == query {
+        score += 120;
+    }
+    if title.starts_with(&query) {
+        score += 90;
+    } else if title.contains(&query) {
+        score += 56;
+    }
+    if subtitle.starts_with(&query) {
+        score += 42;
+    } else if subtitle.contains(&query) {
+        score += 26;
+    }
+    if badge == query {
+        score += 24;
+    } else if !badge.is_empty() && badge.contains(&query) {
+        score += 12;
+    }
+    if item.section == QuickActionSection::Suggested {
+        score += 18;
+    }
+    if matches!(item.target, ActionTarget::CurrentPane) {
+        score += 3;
+    }
+
+    score
 }
