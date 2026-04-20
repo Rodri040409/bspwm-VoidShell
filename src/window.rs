@@ -847,7 +847,14 @@ impl WindowState {
 
     fn close_palette(&self) {
         self.palette_revealer.set_reveal_child(false);
-        self.window.grab_focus();
+        if let Some(pane) = self.focused_pane_ref() {
+            let terminal = pane.terminal().clone();
+            gtk::glib::idle_add_local_once(move || {
+                terminal.grab_focus();
+            });
+        } else {
+            self.window.grab_focus();
+        }
     }
 
     fn rebuild_palette_rows(self: &Rc<Self>) {

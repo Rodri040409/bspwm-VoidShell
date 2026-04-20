@@ -151,6 +151,19 @@ pub fn runtime_icon_search_paths() -> Vec<PathBuf> {
     paths
 }
 
+pub fn live_banner_state_file() -> PathBuf {
+    project_state_file("live-banner.ansi")
+}
+
+pub fn write_live_banner(payload: &str) -> Option<PathBuf> {
+    let path = live_banner_state_file();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    fs::write(&path, payload).ok()?;
+    Some(path)
+}
+
 pub fn install_local_desktop_integration() -> Option<()> {
     let home = home_dir()?;
     let source_icons_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/icons/hicolor");
@@ -560,6 +573,10 @@ pub fn envv(shell_path: &str) -> Vec<String> {
         "TERM_PROGRAM_VERSION".to_string(),
         constants::APP_VERSION.to_string(),
     );
+    vars.insert(
+        "VOIDSHELL_BANNER_FILE".to_string(),
+        live_banner_state_file().display().to_string(),
+    );
     if let Some(inputrc) = readline_inputrc(shell_path) {
         vars.insert("INPUTRC".to_string(), inputrc);
     }
@@ -637,6 +654,13 @@ fn bash_integration_rcfile() -> Option<String> {
          if [ -f \"$HOME/.bashrc\" ]; then\n  . \"$HOME/.bashrc\"\nfi\n\n",
     );
     content.push_str(VOIDSHELL_BASH_INTEGRATION);
+    content.push_str(
+        "\n__voidshell_show_banner() {\n\
+         \t[ -r \"${VOIDSHELL_BANNER_FILE:-}\" ] || return 0\n\
+         \tcommand cat -- \"$VOIDSHELL_BANNER_FILE\"\n\
+         }\n\
+         bind -x '\"\\C-g\":__voidshell_show_banner'\n",
+    );
     fs::write(&path, content).ok()?;
     Some(path.display().to_string())
 }

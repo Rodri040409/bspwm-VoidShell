@@ -1,4 +1,11 @@
 use crate::util;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+
+thread_local! {
+    static SYSTEM_INFO_CACHE: RefCell<BTreeMap<String, (u64, SystemInfo)>> =
+        const { RefCell::new(BTreeMap::new()) };
+}
 
 #[derive(Debug, Clone)]
 pub struct SystemInfo {
@@ -16,7 +23,22 @@ pub struct SystemInfo {
 
 impl SystemInfo {
     pub fn collect(shell_path: &str) -> Self {
-        Self {
+        let cache_key = util::shell_name(shell_path);
+        let now = util::now_epoch_seconds();
+        let max_age_seconds = 45;
+
+        if let Some(cached) = SYSTEM_INFO_CACHE.with(|cache| {
+            cache
+                .borrow()
+                .get(&cache_key)
+                .and_then(|(timestamp, value)| {
+                    (now.saturating_sub(*timestamp) <= max_age_seconds).then(|| value.clone())
+                })
+        }) {
+            return cached;
+        }
+
+        let collected = Self {
             distro: util::platform_display_name().unwrap_or_else(|| "Unknown distro".to_string()),
             kernel: util::kernel_release().unwrap_or_else(|| "Unknown kernel".to_string()),
             gnome: util::command_output("gnome-shell", &["--version"])
@@ -29,7 +51,15 @@ impl SystemInfo {
             public_ip: util::cached_public_ip(900).unwrap_or_else(|| "Unavailable".to_string()),
             hostname: util::hostname(),
             shell: util::shell_name(shell_path),
-        }
+        };
+
+        SYSTEM_INFO_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .insert(cache_key, (now, collected.clone()));
+        });
+
+        collected
     }
 }
 

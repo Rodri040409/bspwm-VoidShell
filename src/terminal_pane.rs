@@ -258,10 +258,25 @@ impl TerminalPane {
             &self.shell_path,
             Some(self.terminal.column_count() as usize),
         );
-        let mut payload = String::from("\r\n");
-        payload.push_str(&rendered.replace('\n', "\r\n"));
-        payload.push_str("\r\n");
-        self.terminal.feed(payload.as_bytes());
+
+        let shell = util::shell_name(&self.shell_path).to_ascii_lowercase();
+        let rendered_via_shell = self.child_pid.get().is_some()
+            && matches!(shell.as_str(), "bash" | "rbash")
+            && util::write_live_banner(&rendered).is_some();
+
+        if rendered_via_shell {
+            self.terminal.feed_child(&[0x07]);
+        } else {
+            let mut payload = String::from("\r\n");
+            payload.push_str(&rendered.replace('\n', "\r\n"));
+            payload.push_str("\r\n");
+            self.terminal.feed(payload.as_bytes());
+            if self.child_pid.get().is_some() {
+                self.terminal.feed_child(b"\n");
+            }
+        }
+
+        self.focus_terminal();
         self.flash_action();
     }
 
