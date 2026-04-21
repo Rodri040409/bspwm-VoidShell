@@ -57,15 +57,21 @@ pub fn default_shell_path() -> String {
         }
     }
 
-    if let Some(shell) = resolve_executable_path("bash") {
-        return shell;
+    #[cfg(not(windows))]
+    {
+        if let Some(shell) = resolve_executable_path("bash") {
+            return shell;
+        }
+
+        if let Some(shell) = resolve_executable_path("sh") {
+            return shell;
+        }
+
+        return "/bin/bash".to_string();
     }
 
-    if let Some(shell) = resolve_executable_path("sh") {
-        return shell;
-    }
-
-    "/bin/bash".to_string()
+    #[cfg(windows)]
+    unreachable!("windows branch returned earlier");
 }
 
 pub fn effective_shell_path(configured: &str) -> String {
@@ -121,7 +127,16 @@ pub fn hostname() -> String {
 }
 
 pub fn home_dir() -> Option<PathBuf> {
-    env::var_os("HOME").map(PathBuf::from)
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
+        .or_else(|| {
+            let drive = env::var_os("HOMEDRIVE")?;
+            let path = env::var_os("HOMEPATH")?;
+            let mut combined = PathBuf::from(drive);
+            combined.push(path);
+            Some(combined)
+        })
 }
 
 pub fn runtime_icon_search_paths() -> Vec<PathBuf> {

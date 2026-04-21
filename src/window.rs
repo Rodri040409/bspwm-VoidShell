@@ -16,8 +16,6 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::time::Duration;
-use vte::prelude::*;
-
 pub struct MainWindow;
 
 struct WindowState {
@@ -277,6 +275,7 @@ impl WindowState {
         self.install_simple_action("resize-up", |state| state.resize_focused(Direction::Up));
         self.install_simple_action("resize-down", |state| state.resize_focused(Direction::Down));
         self.install_simple_action("copy", |state| state.copy_from_focused());
+        self.install_simple_action("cut", |state| state.cut_from_focused());
         self.install_simple_action("paste", |state| state.paste_into_focused());
         self.install_simple_action("preferences", |state| state.open_preferences());
         self.install_simple_action("reload-config", |state| state.reload_config());
@@ -317,8 +316,12 @@ impl WindowState {
             .set_accels_for_action("win.resize-up", &["<Alt><Shift>Up"]);
         self.app
             .set_accels_for_action("win.resize-down", &["<Alt><Shift>Down"]);
-        self.app.set_accels_for_action("win.copy", &["<Alt>c"]);
-        self.app.set_accels_for_action("win.paste", &["<Alt>p"]);
+        self.app
+            .set_accels_for_action("win.copy", &["<Alt>c", "<Primary><Shift>c"]);
+        self.app
+            .set_accels_for_action("win.cut", &["<Alt>x", "<Primary><Shift>x"]);
+        self.app
+            .set_accels_for_action("win.paste", &["<Alt>p", "<Primary><Shift>v"]);
         self.app
             .set_accels_for_action("win.fullscreen", &["<Alt>Return", "F11"]);
         self.app
@@ -612,9 +615,9 @@ impl WindowState {
         self.refresh_header();
 
         if let Some(pane) = self.focused_pane_ref() {
-            let terminal = pane.terminal().clone();
+            let pane = pane.clone();
             gtk::glib::idle_add_local_once(move || {
-                terminal.grab_focus();
+                pane.focus_terminal();
             });
         }
     }
@@ -714,15 +717,19 @@ impl WindowState {
 
     fn copy_from_focused(&self) {
         if let Some(pane) = self.focused_pane_ref() {
-            pane.terminal().copy_clipboard_format(vte::Format::Text);
-            self.show_toast("Copiado desde el panel activo");
+            let _ = pane.copy_selection_to_clipboard();
+        }
+    }
+
+    fn cut_from_focused(&self) {
+        if let Some(pane) = self.focused_pane_ref() {
+            let _ = pane.cut_selection_to_clipboard();
         }
     }
 
     fn paste_into_focused(&self) {
         if let Some(pane) = self.focused_pane_ref() {
-            pane.terminal().paste_clipboard();
-            self.show_toast("Pegado en el panel activo");
+            pane.paste_from_clipboard();
         }
     }
 
@@ -868,9 +875,9 @@ impl WindowState {
     fn close_palette(&self) {
         self.palette_revealer.set_reveal_child(false);
         if let Some(pane) = self.focused_pane_ref() {
-            let terminal = pane.terminal().clone();
+            let pane = pane.clone();
             gtk::glib::idle_add_local_once(move || {
-                terminal.grab_focus();
+                pane.focus_terminal();
             });
         } else {
             self.window.grab_focus();

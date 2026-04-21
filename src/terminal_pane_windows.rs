@@ -1,18 +1,22 @@
 use crate::banner;
 use crate::config::{AppConfig, BannerInfoLayout};
 use crate::constants;
-use crate::context::{self, PanelContext, PanelMode};
+use crate::context::{PanelContext, PanelMode};
 use crate::theme;
 use crate::util;
 use gtk::glib;
 use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{ChildStdin, Command, Stdio};
 use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::thread;
 use std::time::Duration;
-use vte::prelude::*;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 #[derive(Clone)]
 pub struct PaneCallbacks {
@@ -33,12 +37,19 @@ pub enum PaneSpawnMotion {
     FromBottom,
 }
 
+enum ShellEvent {
+    Output(String),
+    Exited(i32),
+}
+
 pub struct TerminalPane {
     id: u64,
     revealer: gtk::Revealer,
     shell_box: gtk::Box,
     terminal_wrap: gtk::Box,
-    terminal: vte::Terminal,
+    output_view: gtk::TextView,
+    output_buffer: gtk::TextBuffer,
+    command_input: gtk::Text,
     background: gtk::Picture,
     ambient: gtk::Box,
     tint: gtk::Box,
@@ -48,8 +59,12 @@ pub struct TerminalPane {
     badge_box: gtk::Box,
     callbacks: PaneCallbacks,
     shell_path: String,
-    child_pid: Cell<Option<glib::Pid>>,
+    child_pid: Cell<Option<u32>>,
     pending_commands: RefCell<Vec<String>>,
+    shell_stdin: RefCell<Option<ChildStdin>>,
+    shell_events: RefCell<Option<Receiver<ShellEvent>>>,
+    current_directory: RefCell<Option<PathBuf>>,
+    last_command: RefCell<Option<String>>,
     context: RefCell<PanelContext>,
     context_tick: Cell<u64>,
     output_pulse_pending: Cell<bool>,
@@ -120,18 +135,35 @@ impl TerminalPane {
         terminal_wrap.set_vexpand(true);
         overlay.add_overlay(&terminal_wrap);
 
-        let terminal = vte::Terminal::new();
-        terminal.add_css_class("pane-terminal");
-        terminal.set_hexpand(true);
-        terminal.set_vexpand(true);
-        terminal.set_scroll_on_output(false);
-        terminal.set_scroll_on_keystroke(true);
-        terminal.set_mouse_autohide(true);
-        terminal.set_allow_hyperlink(true);
-        terminal.set_audible_bell(false);
-        terminal.set_bold_is_bright(true);
-        terminal.set_enable_shaping(true);
-        terminal_wrap.append(&terminal);
+        let terminal_surface = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        terminal_surface.add_css_class("pane-terminal-fallback");
+        terminal_surface.set_hexpand(true);
+        terminal_surface.set_vexpand(true);
+
+        let scroller = gtk::ScrolledWindow::new();
+        scroller.set_hexpand(true);
+        scroller.set_vexpand(true);
+        scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        terminal_surface.append(&scroller);
+
+        let output_view = gtk::TextView::new();
+        output_view.add_css_class("pane-terminal");
+        output_view.set_editable(false);
+        output_view.set_cursor_visible(false);
+        output_view.set_monospace(true);
+        output_view.set_wrap_mode(gtk::WrapMode::WordChar);
+        output_view.set_hexpand(true);
+        output_view.set_vexpand(true);
+        let output_buffer = output_view.buffer();
+        scroller.set_child(Some(&output_view));
+
+        let command_input = gtk::Text::new();
+        command_input.add_css_class("pane-command-input");
+        command_input.set_hexpand(true);
+        command_input.set_placeholder_text(Some("Escribe un comando y presiona Enter"));
+        terminal_surface.append(&command_input);
+
+        terminal_wrap.append(&terminal_surface);
 
         let chrome = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         chrome.add_css_class("pane-chrome");
@@ -171,7 +203,9 @@ impl TerminalPane {
             revealer,
             shell_box,
             terminal_wrap,
-            terminal,
+            output_view,
+            output_buffer,
+            command_input,
             background,
             ambient,
             tint,
@@ -183,6 +217,10 @@ impl TerminalPane {
             shell_path,
             child_pid: Cell::new(None),
             pending_commands: RefCell::new(Vec::new()),
+            shell_stdin: RefCell::new(None),
+            shell_events: RefCell::new(None),
+            current_directory: RefCell::new(working_directory),
+            last_command: RefCell::new(None),
             context: RefCell::new(PanelContext::default()),
             context_tick: Cell::new(0),
             output_pulse_pending: Cell::new(false),
@@ -201,7 +239,8 @@ impl TerminalPane {
         pane.install_drag_handlers();
         pane.install_keyboard_shortcuts();
         pane.install_runtime_handlers();
-        pane.spawn_shell(working_directory, show_banner);
+        pane.schedule_shell_pump();
+        pane.spawn_shell(show_banner);
         pane.animate_open(config, spawn_motion);
         pane.schedule_context_refresh();
 
@@ -222,7 +261,7 @@ impl TerminalPane {
     }
 
     pub fn current_directory(&self) -> Option<PathBuf> {
-        self.context.borrow().cwd.clone()
+        self.current_directory.borrow().clone()
     }
 
     pub fn detach_from_parent(&self) {
@@ -259,7 +298,7 @@ impl TerminalPane {
     }
 
     pub fn focus_terminal(&self) {
-        self.terminal.grab_focus();
+        self.command_input.grab_focus();
     }
 
     pub fn show_banner_info(&self) {
@@ -299,42 +338,72 @@ impl TerminalPane {
     }
 
     pub fn run_command(&self, command: &str) {
-        let mut payload = command.to_string();
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        self.note_possible_cwd_change(trimmed);
+        *self.last_command.borrow_mut() = Some(trimmed.to_string());
+
+        let mut payload = trimmed.to_string();
         if !payload.ends_with('\n') {
             payload.push('\n');
         }
 
         if self.child_pid.get().is_some() {
-            self.terminal.feed_child(payload.as_bytes());
+            let mut shell_stdin = self.shell_stdin.borrow_mut();
+            if let Some(stdin) = shell_stdin.as_mut() {
+                let _ = stdin.write_all(payload.as_bytes());
+                let _ = stdin.flush();
+            } else {
+                self.pending_commands.borrow_mut().push(payload);
+            }
         } else {
             self.pending_commands.borrow_mut().push(payload);
         }
 
         self.flash_action();
+        self.refresh_context();
     }
 
     pub fn copy_selection_to_clipboard(&self) -> bool {
-        if !self.terminal.has_selection() {
-            return false;
+        if self.command_input.has_focus() && self.command_input.selection_bounds().is_some() {
+            self.command_input.emit_copy_clipboard();
+            (self.callbacks.on_notification)("Copiado desde el panel activo".to_string());
+            return true;
         }
 
-        self.terminal.copy_clipboard_format(vte::Format::Text);
-        (self.callbacks.on_notification)("Copiado desde el panel activo".to_string());
-        true
+        if self.output_buffer.selection_bounds().is_some() {
+            let clipboard = self.output_view.clipboard();
+            self.output_buffer.copy_clipboard(&clipboard);
+            (self.callbacks.on_notification)("Copiado desde el panel activo".to_string());
+            return true;
+        }
+
+        false
     }
 
     pub fn cut_selection_to_clipboard(&self) -> bool {
-        if !self.terminal.has_selection() {
-            return false;
+        if self.command_input.has_focus() && self.command_input.selection_bounds().is_some() {
+            self.command_input.emit_cut_clipboard();
+            (self.callbacks.on_notification)("Cortado desde el panel activo".to_string());
+            return true;
         }
 
-        self.terminal.copy_clipboard_format(vte::Format::Text);
-        (self.callbacks.on_notification)("Cortado desde el panel activo".to_string());
-        true
+        if self.output_buffer.selection_bounds().is_some() {
+            let clipboard = self.output_view.clipboard();
+            self.output_buffer.cut_clipboard(&clipboard, false);
+            (self.callbacks.on_notification)("Cortado desde el panel activo".to_string());
+            return true;
+        }
+
+        false
     }
 
     pub fn paste_from_clipboard(&self) {
-        self.terminal.paste_clipboard();
+        self.command_input.grab_focus();
+        self.command_input.emit_paste_clipboard();
         (self.callbacks.on_notification)("Pegado en el panel activo".to_string());
     }
 
@@ -373,26 +442,8 @@ impl TerminalPane {
             self.wallpaper_available.set(true);
         }
 
-        let font = theme::font_description(config);
-        self.terminal.set_font(Some(&font));
-        self.terminal.set_scrollback_lines(config.scrollback_lines);
-        self.terminal
-            .set_cursor_shape(theme::cursor_shape(&config.cursor_style));
-
         self.apply_palette_classes();
-        let palette = theme::terminal_palette(config, self.palette_preset.get());
-        let palette_refs: Vec<&gtk::gdk::RGBA> = palette.palette.iter().collect();
-        self.terminal.set_colors(
-            Some(&palette.foreground),
-            Some(&palette.background),
-            &palette_refs,
-        );
-        self.terminal.set_color_cursor(Some(&palette.cursor));
-        self.terminal
-            .set_color_cursor_foreground(Some(&palette.cursor_text));
-        self.terminal.set_color_highlight(Some(&palette.cursor));
-        self.terminal
-            .set_color_highlight_foreground(Some(&palette.cursor_text));
+        self.output_view.set_monospace(true);
         self.refresh_density_visuals();
     }
 
@@ -412,17 +463,25 @@ impl TerminalPane {
         let click = gtk::GestureClick::new();
         let focus_callback = self.callbacks.on_focus.clone();
         let pane_id = self.id;
-        let terminal = self.terminal.clone();
+        let command_input = self.command_input.clone();
         click.connect_pressed(move |_, _, _, _| {
-            terminal.grab_focus();
+            command_input.grab_focus();
             focus_callback(pane_id);
         });
         self.shell_box.add_controller(click);
 
         let focus_callback = self.callbacks.on_focus.clone();
         let pane_id = self.id;
-        self.terminal.connect_has_focus_notify(move |terminal| {
-            if terminal.has_focus() {
+        self.command_input.connect_has_focus_notify(move |input| {
+            if input.has_focus() {
+                focus_callback(pane_id);
+            }
+        });
+
+        let focus_callback = self.callbacks.on_focus.clone();
+        let pane_id = self.id;
+        self.output_view.connect_has_focus_notify(move |view| {
+            if view.has_focus() {
                 focus_callback(pane_id);
             }
         });
@@ -488,6 +547,11 @@ impl TerminalPane {
     }
 
     fn install_keyboard_shortcuts(self: &Rc<Self>) {
+        self.install_shortcut_controller(&self.command_input);
+        self.install_shortcut_controller(&self.output_view);
+    }
+
+    fn install_shortcut_controller(self: &Rc<Self>, widget: &impl IsA<gtk::Widget>) {
         let key_controller = gtk::EventControllerKey::new();
         let weak = Rc::downgrade(self);
         key_controller.connect_key_pressed(move |_, key, _, modifiers| {
@@ -526,41 +590,31 @@ impl TerminalPane {
                 _ => glib::Propagation::Proceed,
             }
         });
-        self.terminal.add_controller(key_controller);
+        widget.add_controller(key_controller);
     }
 
     fn install_runtime_handlers(self: &Rc<Self>) {
         let weak = Rc::downgrade(self);
-        self.terminal
-            .connect_notify_local(Some("current-directory-uri"), move |_, _| {
-                if let Some(pane) = weak.upgrade() {
-                    pane.refresh_context();
-                }
-            });
+        self.command_input.connect_activate(move |input| {
+            let Some(pane) = weak.upgrade() else {
+                return;
+            };
 
-        let weak = Rc::downgrade(self);
-        self.terminal.connect_contents_changed(move |_| {
-            if let Some(pane) = weak.upgrade() {
-                pane.pulse_output();
-            }
+            let command = input.text().to_string();
+            input.set_text("");
+            pane.run_command(&command);
         });
+    }
 
+    fn schedule_shell_pump(self: &Rc<Self>) {
         let weak = Rc::downgrade(self);
-        self.terminal.connect_child_exited(move |_, status| {
-            if let Some(pane) = weak.upgrade() {
-                pane.shell_box.remove_css_class("mode-editor");
-                pane.shell_box.remove_css_class("mode-monitor");
-                pane.shell_box.remove_css_class("mode-remote");
-                pane.child_pid.set(None);
-                pane.refresh_context();
-                if status != 0 {
-                    (pane.callbacks.on_notification)(format!(
-                        "Pane {} exited with status {}",
-                        pane.id, status
-                    ));
-                }
-                (pane.callbacks.on_exit)(pane.id, status);
-            }
+        gtk::glib::timeout_add_local(Duration::from_millis(40), move || {
+            let Some(pane) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+
+            pane.drain_shell_events();
+            glib::ControlFlow::Continue
         });
     }
 
@@ -575,71 +629,149 @@ impl TerminalPane {
         });
     }
 
-    fn spawn_shell(self: &Rc<Self>, working_directory: Option<PathBuf>, show_banner: bool) {
-        let env_strings = util::envv(&self.shell_path);
-        let env_refs: Vec<&str> = env_strings.iter().map(String::as_str).collect();
+    fn spawn_shell(self: &Rc<Self>, show_banner: bool) {
         let shell_args = util::default_shell_args(&self.shell_path);
-        let mut argv_strings = vec![self.shell_path.clone()];
-        argv_strings.extend(shell_args);
-        let argv_refs: Vec<&str> = argv_strings.iter().map(String::as_str).collect();
-        let working_directory_string = working_directory
-            .as_ref()
-            .map(|path| path.display().to_string());
+        let mut command = Command::new(&self.shell_path);
+        command.args(&shell_args);
+        if let Some(cwd) = self.current_directory.borrow().clone() {
+            command.current_dir(cwd);
+        }
+        command.stdin(Stdio::piped());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
 
-        let weak = Rc::downgrade(self);
-        self.terminal.spawn_async(
-            vte::PtyFlags::DEFAULT,
-            working_directory_string.as_deref(),
-            &argv_refs,
-            &env_refs,
-            gtk::glib::SpawnFlags::DEFAULT,
-            || {},
-            -1,
-            None::<&gtk::gio::Cancellable>,
-            move |result| {
-                if let Some(pane) = weak.upgrade() {
-                    match result {
-                        Ok(pid) => {
-                            pane.child_pid.set(Some(pid));
-                            if show_banner {
-                                pane.render_banner(false, false);
-                            }
-                            let mut commands = pane.pending_commands.borrow_mut();
-                            for command in commands.drain(..) {
-                                pane.terminal.feed_child(command.as_bytes());
-                            }
-                            pane.refresh_context();
-                        }
-                        Err(error) => {
-                            (pane.callbacks.on_notification)(format!(
-                                "Failed to spawn pane {}: {error}",
-                                pane.id
-                            ));
-                        }
+        #[cfg(windows)]
+        command.creation_flags(0x08000000);
+
+        match command.spawn() {
+            Ok(mut child) => {
+                self.child_pid.set(Some(child.id()));
+                *self.shell_stdin.borrow_mut() = child.stdin.take();
+
+                let (sender, receiver) = mpsc::channel();
+                *self.shell_events.borrow_mut() = Some(receiver);
+
+                if let Some(stdout) = child.stdout.take() {
+                    spawn_reader_thread(stdout, sender.clone());
+                }
+                if let Some(stderr) = child.stderr.take() {
+                    spawn_reader_thread(stderr, sender.clone());
+                }
+
+                thread::spawn(move || {
+                    let status = child.wait().ok();
+                    let code = status
+                        .as_ref()
+                        .and_then(|status| status.code())
+                        .unwrap_or_default();
+                    let _ = sender.send(ShellEvent::Exited(code));
+                });
+
+                if show_banner {
+                    self.render_banner(false, false);
+                }
+
+                let mut commands = self.pending_commands.borrow_mut();
+                for command in commands.drain(..) {
+                    if let Some(stdin) = self.shell_stdin.borrow_mut().as_mut() {
+                        let _ = stdin.write_all(command.as_bytes());
+                        let _ = stdin.flush();
                     }
                 }
-            },
-        );
+
+                self.refresh_context();
+            }
+            Err(error) => {
+                (self.callbacks.on_notification)(format!(
+                    "Failed to spawn pane {}: {error}",
+                    self.id
+                ));
+                self.append_output(&format!("No se pudo iniciar el shell: {error}\n"));
+            }
+        }
+    }
+
+    fn drain_shell_events(&self) {
+        let mut events = Vec::new();
+        let mut disconnected = false;
+
+        {
+            let mut shell_events = self.shell_events.borrow_mut();
+            let Some(receiver) = shell_events.as_mut() else {
+                return;
+            };
+
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+
+            if disconnected {
+                *shell_events = None;
+            }
+        }
+
+        for event in events {
+            match event {
+                ShellEvent::Output(chunk) => {
+                    self.append_output(&chunk.replace("\r\n", "\n"));
+                }
+                ShellEvent::Exited(status) => {
+                    self.shell_box.remove_css_class("mode-editor");
+                    self.shell_box.remove_css_class("mode-monitor");
+                    self.shell_box.remove_css_class("mode-remote");
+                    self.child_pid.set(None);
+                    *self.shell_stdin.borrow_mut() = None;
+                    self.refresh_context();
+                    if status != 0 {
+                        (self.callbacks.on_notification)(format!(
+                            "Pane {} exited with status {}",
+                            self.id, status
+                        ));
+                    }
+                    (self.callbacks.on_exit)(self.id, status);
+                }
+            }
+        }
     }
 
     fn refresh_context(&self) {
-        #[cfg(unix)]
-        let pty_fd = self.terminal.pty().map(|pty| pty.fd().as_raw_fd());
-        #[cfg(not(unix))]
-        let pty_fd = Option::<i32>::None;
-        let mut next = context::detect_panel_context(
-            self.child_pid.get().map(|pid| pid.0),
-            pty_fd,
-            &self.shell_path,
-        );
-
         let tick = self.context_tick.get() + 1;
         self.context_tick.set(tick);
+
+        let shell = util::shell_name(&self.shell_path);
+        let mut next = PanelContext {
+            cwd: self.current_directory.borrow().clone(),
+            hostname: util::hostname(),
+            shell: shell.clone(),
+            shell_alive: self.child_pid.get().is_some(),
+            foreground_process: self.child_pid.get().map(|_| shell),
+            foreground_command: self.last_command.borrow().clone(),
+            in_ssh: false,
+            ssh_target: None,
+            container_hint: None,
+            git_branch: None,
+            lab_hint: None,
+            mode: if self.child_pid.get().is_some() {
+                PanelMode::Shell
+            } else {
+                PanelMode::Exited
+            },
+        };
+
         let previous = self.context.borrow().clone();
         let should_refresh_git =
             previous.cwd != next.cwd || (self.is_active.get() && tick % 4 == 0) || tick % 12 == 0;
         next.git_branch = if should_refresh_git {
-            next.cwd.as_deref().and_then(context::detect_git_branch)
+            next.cwd
+                .as_deref()
+                .and_then(crate::context::detect_git_branch)
         } else {
             previous.git_branch.clone()
         };
@@ -687,6 +819,16 @@ impl TerminalPane {
         }
 
         self.refresh_density_visuals();
+    }
+
+    fn append_output(&self, text: &str) {
+        let mut end = self.output_buffer.end_iter();
+        self.output_buffer.insert(&mut end, text);
+
+        let mut scroll_iter = self.output_buffer.end_iter();
+        self.output_view
+            .scroll_to_iter(&mut scroll_iter, 0.0, false, 0.0, 1.0);
+        self.pulse_output();
     }
 
     fn flash_action(&self) {
@@ -771,33 +913,19 @@ impl TerminalPane {
                 && self.wallpaper_hint.get()
                 && (!dense || self.is_active.get()),
         );
-        self.terminal.set_enable_shaping(!dense);
+        self.command_input
+            .set_visible(!dense || self.is_active.get());
     }
 
     fn render_banner(&self, focus_terminal: bool, flash: bool) {
-        let columns = self.terminal.column_count().max(1) as usize;
         let rendered = banner::startup_payload_for_columns(
             &self.shell_path,
-            Some(columns),
+            Some(100),
             self.banner_layout.get(),
         );
-
-        let shell = util::shell_name(&self.shell_path).to_ascii_lowercase();
-        let rendered_via_shell = self.child_pid.get().is_some()
-            && matches!(shell.as_str(), "bash" | "rbash")
-            && util::write_live_banner(&rendered).is_some();
-
-        if rendered_via_shell {
-            self.terminal.feed_child(&[0x07]);
-        } else {
-            let mut payload = String::from("\r\n");
-            payload.push_str(&rendered.replace('\n', "\r\n"));
-            payload.push_str("\r\n");
-            self.terminal.feed(payload.as_bytes());
-            if self.child_pid.get().is_some() {
-                self.terminal.feed_child(b"\n");
-            }
-        }
+        self.append_output("\n");
+        self.append_output(&rendered);
+        self.append_output("\n");
 
         if focus_terminal {
             self.focus_terminal();
@@ -852,6 +980,46 @@ impl TerminalPane {
             constants::CONTEXT_REFRESH_MS * 4
         }
     }
+
+    fn note_possible_cwd_change(&self, command: &str) {
+        let normalized = command.trim();
+        if normalized.is_empty() {
+            return;
+        }
+
+        let lower = normalized.to_ascii_lowercase();
+        let path_hint = if lower == "cd" || lower == "pushd" {
+            util::home_dir()
+        } else if let Some(rest) = normalized
+            .strip_prefix("cd ")
+            .or_else(|| normalized.strip_prefix("pushd "))
+            .or_else(|| normalized.strip_prefix("chdir "))
+            .or_else(|| normalized.strip_prefix("sl "))
+            .or_else(|| normalized.strip_prefix("Set-Location "))
+        {
+            let trimmed = rest.trim();
+            let trimmed = trimmed.strip_prefix("/d ").unwrap_or(trimmed);
+            let trimmed = trimmed.trim_matches(|ch| ch == '"' || ch == '\'');
+            if trimmed.is_empty() {
+                util::home_dir()
+            } else {
+                let mut candidate = util::expand_user_path(trimmed);
+                if !candidate.is_absolute()
+                    && let Some(current) = self.current_directory.borrow().clone()
+                {
+                    candidate = current.join(candidate);
+                }
+                Some(candidate)
+            }
+        } else {
+            None
+        };
+
+        if let Some(path) = path_hint {
+            let next = normalize_path_hint(&path);
+            *self.current_directory.borrow_mut() = Some(next);
+        }
+    }
 }
 
 impl PaneSpawnMotion {
@@ -894,6 +1062,29 @@ impl PaneSpawnMotion {
             Self::FromBottom => "close-to-bottom",
         }
     }
+}
+
+fn spawn_reader_thread<R>(mut reader: R, sender: Sender<ShellEvent>)
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(bytes_read) => {
+                    let chunk = String::from_utf8_lossy(&buffer[..bytes_read]).into_owned();
+                    let _ = sender.send(ShellEvent::Output(chunk));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+fn normalize_path_hint(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn set_css_class(widget: &impl IsA<gtk::Widget>, class_name: &str, enabled: bool) {

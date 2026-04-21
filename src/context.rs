@@ -102,6 +102,7 @@ pub fn detect_panel_context(
 ) -> PanelContext {
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = pty_fd;
         return detect_panel_context_portable(shell_pid, shell_path);
     }
 
@@ -251,7 +252,10 @@ fn find_foreground_pid(pty_fd: RawFd) -> Option<i32> {
     #[cfg(unix)]
     let process_group = unsafe { libc::tcgetpgrp(pty_fd) };
     #[cfg(not(unix))]
-    let process_group = -1;
+    let process_group = {
+        let _ = pty_fd;
+        -1
+    };
 
     if process_group <= 0 {
         return None;

@@ -1,4 +1,6 @@
-use crate::config::{AppConfig, CursorStyle};
+use crate::config::AppConfig;
+#[cfg(not(windows))]
+use crate::config::CursorStyle;
 use crate::util;
 use gtk::gdk;
 use std::cell::RefCell;
@@ -104,6 +106,7 @@ pub fn font_description(config: &AppConfig) -> gtk::pango::FontDescription {
     description
 }
 
+#[cfg(not(windows))]
 pub fn cursor_shape(style: &CursorStyle) -> vte::CursorShape {
     match style {
         CursorStyle::Block => vte::CursorShape::Block,
