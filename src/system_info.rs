@@ -39,7 +39,8 @@ impl SystemInfo {
         }
 
         let collected = Self {
-            distro: util::platform_display_name().unwrap_or_else(|| "Distro desconocida".to_string()),
+            distro: util::platform_display_name()
+                .unwrap_or_else(|| "Distro desconocida".to_string()),
             kernel: util::kernel_release().unwrap_or_else(|| "Kernel desconocido".to_string()),
             gnome: util::command_output("gnome-shell", &["--version"])
                 .or_else(|| util::command_output("gnome-session", &["--version"]))

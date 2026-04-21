@@ -407,6 +407,16 @@ impl TerminalPane {
         (self.callbacks.on_notification)("Pegado en el panel activo".to_string());
     }
 
+    pub fn select_all(&self) {
+        if self.command_input.has_focus() {
+            self.command_input.select_region(0, -1);
+            return;
+        }
+
+        let (start, end) = self.output_buffer.bounds();
+        self.output_buffer.select_range(&start, &end);
+    }
+
     pub fn apply_config(&self, config: &AppConfig) {
         theme::install_or_update(config);
 
@@ -553,6 +563,7 @@ impl TerminalPane {
 
     fn install_shortcut_controller(self: &Rc<Self>, widget: &impl IsA<gtk::Widget>) {
         let key_controller = gtk::EventControllerKey::new();
+        key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(self);
         key_controller.connect_key_pressed(move |_, key, _, modifiers| {
             let shortcut_pressed = modifiers.contains(
@@ -563,28 +574,31 @@ impl TerminalPane {
                 return glib::Propagation::Proceed;
             }
 
-            let action = key.to_unicode().map(|value| value.to_ascii_lowercase());
             let Some(pane) = weak.upgrade() else {
                 return glib::Propagation::Proceed;
             };
 
-            match action {
-                Some('c') => {
+            match key.to_lower() {
+                gtk::gdk::Key::c => {
                     if pane.copy_selection_to_clipboard() {
                         glib::Propagation::Stop
                     } else {
                         glib::Propagation::Proceed
                     }
                 }
-                Some('x') => {
+                gtk::gdk::Key::x => {
                     if pane.cut_selection_to_clipboard() {
                         glib::Propagation::Stop
                     } else {
                         glib::Propagation::Proceed
                     }
                 }
-                Some('v') => {
+                gtk::gdk::Key::v => {
                     pane.paste_from_clipboard();
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::a => {
+                    pane.select_all();
                     glib::Propagation::Stop
                 }
                 _ => glib::Propagation::Proceed,

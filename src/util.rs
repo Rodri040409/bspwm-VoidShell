@@ -221,7 +221,7 @@ pub fn install_local_desktop_integration() -> Option<()> {
     }
 
     let desktop_content = format!(
-        "[Desktop Entry]\nName={name}\nComment=VoidShell tiling terminal for Fedora GNOME\nExec={exec}\nIcon={icon}\nTerminal=false\nType=Application\nCategories=System;TerminalEmulator;GTK;\nStartupNotify=true\nStartupWMClass={wm_class}\n",
+        "[Desktop Entry]\nName={name}\nComment=VoidShell tiling terminal for Fedora GNOME\nExec={exec}\nIcon={icon}\nTerminal=false\nType=Application\nCategories=System;TerminalEmulator;GTK;\nMimeType=x-scheme-handler/terminal;\nStartupNotify=true\nStartupWMClass={wm_class}\nX-ExecArg=--execute\nX-TerminalArgDir=--working-directory\n",
         name = constants::APP_NAME,
         exec = desktop_exec_value(&current_exe),
         icon = constants::APP_ICON,

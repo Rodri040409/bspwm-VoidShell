@@ -124,13 +124,7 @@ fn build_info_lines(
         detail_width,
         wrap_details,
     );
-    append_detail_lines(
-        &mut lines,
-        "gnome",
-        &info.gnome,
-        detail_width,
-        wrap_details,
-    );
+    append_detail_lines(&mut lines, "gnome", &info.gnome, detail_width, wrap_details);
     append_detail_lines(&mut lines, "cpu", &info.cpu, detail_width, wrap_details);
     append_detail_lines(&mut lines, "ram", &info.ram, detail_width, wrap_details);
     append_detail_lines(&mut lines, "gpu", &info.gpu, detail_width, wrap_details);
@@ -155,13 +149,7 @@ fn build_info_lines(
         detail_width,
         wrap_details,
     );
-    append_detail_lines(
-        &mut lines,
-        "shell",
-        &info.shell,
-        detail_width,
-        wrap_details,
-    );
+    append_detail_lines(&mut lines, "shell", &info.shell, detail_width, wrap_details);
 
     lines
 }
@@ -174,7 +162,10 @@ fn append_detail_lines(
     wrap_details: bool,
 ) {
     if !wrap_details {
-        lines.push(detail_line(label, &truncate_visible(value, Some(detail_width))));
+        lines.push(detail_line(
+            label,
+            &truncate_visible(value, Some(detail_width)),
+        ));
         return;
     }
 

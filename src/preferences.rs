@@ -217,7 +217,8 @@ pub fn build_dialog(
         .title("Posición de la info del banner")
         .subtitle("Mantén la info del sistema a la derecha del ASCII o muévela abajo.")
         .build();
-    let banner_layout_dropdown = gtk::DropDown::from_strings(&["A la derecha del ASCII", "Debajo del ASCII"]);
+    let banner_layout_dropdown =
+        gtk::DropDown::from_strings(&["A la derecha del ASCII", "Debajo del ASCII"]);
     banner_layout_dropdown.set_selected(match shared.borrow().banner_info_layout {
         BannerInfoLayout::Right => 0,
         BannerInfoLayout::Below => 1,

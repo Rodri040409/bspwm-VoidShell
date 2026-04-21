@@ -18,6 +18,86 @@ mod terminal_pane;
 mod terminal_pane;
 
 use adw::prelude::*;
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+#[derive(Default)]
+struct LaunchOptions {
+    startup_command: Option<String>,
+    working_directory: Option<PathBuf>,
+}
+
+fn normalize_launch_path(value: OsString) -> Option<PathBuf> {
+    let candidate = PathBuf::from(&value);
+    if candidate.is_dir() {
+        return Some(candidate);
+    }
+    if candidate.is_file() {
+        return candidate.parent().map(PathBuf::from);
+    }
+
+    let text = value.to_string_lossy();
+    if text.contains("://") {
+        let file = gtk::gio::File::for_uri(&text);
+        if let Some(path) = file.path() {
+            if path.is_dir() {
+                return Some(path);
+            }
+            if path.is_file() {
+                return path.parent().map(PathBuf::from);
+            }
+        }
+    }
+
+    None
+}
+
+fn command_from_args(args: impl Iterator<Item = OsString>) -> Option<String> {
+    let parts: Vec<String> = args
+        .map(|arg| util::shell_quote(&arg.to_string_lossy()))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+fn parse_launch_options() -> LaunchOptions {
+    let mut options = LaunchOptions::default();
+    let mut args = std::env::args_os().skip(1);
+
+    while let Some(arg) = args.next() {
+        let text = arg.to_string_lossy();
+
+        if let Some(value) = text.strip_prefix("--working-directory=") {
+            options.working_directory = normalize_launch_path(OsString::from(value));
+            continue;
+        }
+        if text == "--working-directory" {
+            if let Some(value) = args.next() {
+                options.working_directory = normalize_launch_path(value);
+            }
+            continue;
+        }
+        if let Some(value) = text.strip_prefix("--execute=") {
+            options.startup_command = Some(value.to_string());
+            break;
+        }
+        if text == "--execute" || text == "-e" {
+            options.startup_command = command_from_args(args);
+            break;
+        }
+        if text == "--" {
+            options.startup_command = command_from_args(args);
+            break;
+        }
+        if text.starts_with('-') {
+            continue;
+        }
+        if options.working_directory.is_none() {
+            options.working_directory = normalize_launch_path(arg);
+        }
+    }
+
+    options
+}
 
 #[cfg(windows)]
 fn configure_windows_runtime_prefix() {
@@ -61,6 +141,11 @@ fn main() -> gtk::glib::ExitCode {
     #[cfg(windows)]
     configure_windows_runtime_prefix();
 
+    let launch_options = parse_launch_options();
+    if let Some(working_directory) = &launch_options.working_directory {
+        let _ = std::env::set_current_dir(working_directory);
+    }
+
     let app = adw::Application::builder()
         .application_id(constants::APP_ID)
         .build();
@@ -77,8 +162,8 @@ fn main() -> gtk::glib::ExitCode {
         gtk::Window::set_default_icon_name(constants::APP_ICON);
     });
 
-    app.connect_activate(|app| {
-        window::MainWindow::present(app);
+    app.connect_activate(move |app| {
+        window::MainWindow::present(app, launch_options.startup_command.clone());
     });
 
     app.run()

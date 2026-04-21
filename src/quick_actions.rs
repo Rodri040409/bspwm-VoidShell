@@ -219,7 +219,8 @@ fn built_in_actions() -> Vec<QuickActionItem> {
     items.push(QuickActionItem {
         section: QuickActionSection::Layout,
         title: "Mostrar banner de información del sistema".to_string(),
-        subtitle: "Imprimir el banner ASCII y el resumen actual del sistema en este panel.".to_string(),
+        subtitle: "Imprimir el banner ASCII y el resumen actual del sistema en este panel."
+            .to_string(),
         badge: Some("INFO".to_string()),
         target: ActionTarget::CurrentPane,
         command: QuickActionCommand::Internal(InternalAction::ShowInfo),
@@ -228,7 +229,9 @@ fn built_in_actions() -> Vec<QuickActionItem> {
     items.push(QuickActionItem {
         section: QuickActionSection::Layout,
         title: "Alternar zoom del panel".to_string(),
-        subtitle: "Acercar o restaurar el panel enfocado sin poner la ventana en pantalla completa.".to_string(),
+        subtitle:
+            "Acercar o restaurar el panel enfocado sin poner la ventana en pantalla completa."
+                .to_string(),
         badge: Some("PANEL".to_string()),
         target: ActionTarget::CurrentPane,
         command: QuickActionCommand::Internal(InternalAction::TogglePaneZoom),
@@ -459,9 +462,7 @@ fn classify_shell_command(
         .unwrap_or_default();
 
     match token.as_str() {
-        "git" | "lazygit" | "gitui" | "gh" => {
-            (QuickActionSection::Git, ActionTarget::CurrentPane)
-        }
+        "git" | "lazygit" | "gitui" | "gh" => (QuickActionSection::Git, ActionTarget::CurrentPane),
         "ssh" | "mosh" | "scp" | "sftp" | "docker" | "podman" | "distrobox" | "toolbox" => {
             (QuickActionSection::Remote, ActionTarget::NewPane)
         }
@@ -513,7 +514,8 @@ fn internal_query_actions(query: &str) -> Vec<QuickActionItem> {
         return vec![QuickActionItem {
             section: QuickActionSection::Suggested,
             title: "Mostrar banner de información del sistema".to_string(),
-            subtitle: "Imprimir la información ASCII actual del sistema en el panel activo.".to_string(),
+            subtitle: "Imprimir la información ASCII actual del sistema en el panel activo."
+                .to_string(),
             badge: Some("INFO".to_string()),
             target: ActionTarget::CurrentPane,
             command: QuickActionCommand::Internal(InternalAction::ShowInfo),
@@ -531,7 +533,9 @@ fn internal_query_actions(query: &str) -> Vec<QuickActionItem> {
         }];
     }
 
-    if let Some(direction) = parse_directional_command(command, &["swap", "move", "intercambiar", "mover"]) {
+    if let Some(direction) =
+        parse_directional_command(command, &["swap", "move", "intercambiar", "mover"])
+    {
         return vec![QuickActionItem {
             section: QuickActionSection::Suggested,
             title: format!("Intercambiar panel {}", direction_label(direction)),
@@ -548,7 +552,10 @@ fn internal_query_actions(query: &str) -> Vec<QuickActionItem> {
         .or_else(|| command.strip_prefix("palette "))
         .or_else(|| command.strip_prefix("paleta "));
     if let Some(theme_name) = theme_name.map(str::trim) {
-        if matches!(theme_name, "default" | "reset" | "base" | "predeterminado" | "restablecer") {
+        if matches!(
+            theme_name,
+            "default" | "reset" | "base" | "predeterminado" | "restablecer"
+        ) {
             return vec![QuickActionItem {
                 section: QuickActionSection::Suggested,
                 title: "Restablecer paleta del panel".to_string(),

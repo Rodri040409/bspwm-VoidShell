@@ -43,17 +43,18 @@ struct WindowState {
     palette_search: gtk::SearchEntry,
     palette_list: gtk::ListBox,
     palette_items: RefCell<Vec<QuickActionItem>>,
+    startup_command: Option<String>,
 }
 
 impl MainWindow {
-    pub fn present(app: &adw::Application) {
-        let state = WindowState::new(app.clone());
+    pub fn present(app: &adw::Application, startup_command: Option<String>) {
+        let state = WindowState::new(app.clone(), startup_command);
         state.window.present();
     }
 }
 
 impl WindowState {
-    fn new(app: adw::Application) -> Rc<Self> {
+    fn new(app: adw::Application, startup_command: Option<String>) -> Rc<Self> {
         let config_manager = ConfigManager::new();
         let history_manager = HistoryManager::new();
         let config = config_manager.load_or_default();
@@ -193,6 +194,7 @@ impl WindowState {
             palette_search,
             palette_list,
             palette_items: RefCell::new(Vec::new()),
+            startup_command,
         });
 
         state.install_actions();
@@ -379,12 +381,15 @@ impl WindowState {
         );
 
         self.layout.borrow_mut().set_root_leaf(pane_id);
-        self.panes.borrow_mut().insert(pane_id, pane);
+        self.panes.borrow_mut().insert(pane_id, pane.clone());
         self.history.borrow_mut().begin_session(
             pane_id,
             &util::shell_name(&shell_path),
             cwd.as_deref().and_then(|path| path.to_str()),
         );
+        if let Some(command) = &self.startup_command {
+            pane.run_command(command);
+        }
         self.persist_history();
         self.set_focused_pane(pane_id);
         self.rebuild_layout();
