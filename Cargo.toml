@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-adw = { package = "libadwaita", version = "0.9.1", features = ["v1_8", "gtk_v4_18"] }
 directories = "6.0.0"
-gtk = { package = "gtk4", version = "0.11.2", features = ["gnome_48", "v4_18"] }
+gtk = { package = "gtk4", version = "0.11.2", features = ["gnome_46"] }
 libc = "0.2.177"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 toml = "0.9.8"
 
 [target.'cfg(not(windows))'.dependencies]
+adw = { package = "libadwaita", version = "0.9.1", features = ["v1_8", "gtk_v4_18"] }
 vte = { package = "vte4", version = "0.10.0", features = ["gtk_v4_18", "v0_82"] }

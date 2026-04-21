@@ -263,7 +263,7 @@ impl TerminalPane {
     }
 
     pub fn show_banner_info(&self) {
-        self.render_banner(true, true);
+        self.render_banner(true, true, true);
         self.focus_terminal();
     }
 
@@ -610,7 +610,9 @@ impl TerminalPane {
                         Ok(pid) => {
                             pane.child_pid.set(Some(pid));
                             if show_banner {
-                                pane.render_banner(false, false);
+                                // Avoid shell-triggered banner replay during spawn; bash/readline
+                                // may not be ready yet and can leak control-key artifacts.
+                                pane.render_banner(false, false, false);
                             }
                             let mut commands = pane.pending_commands.borrow_mut();
                             for command in commands.drain(..) {
@@ -782,7 +784,7 @@ impl TerminalPane {
         self.terminal.set_enable_shaping(!dense);
     }
 
-    fn render_banner(&self, focus_terminal: bool, flash: bool) {
+    fn render_banner(&self, focus_terminal: bool, flash: bool, allow_shell_integration: bool) {
         let columns = self.terminal.column_count().max(1) as usize;
         let rendered = banner::startup_payload_for_columns(
             &self.shell_path,
@@ -791,7 +793,8 @@ impl TerminalPane {
         );
 
         let shell = util::shell_name(&self.shell_path).to_ascii_lowercase();
-        let rendered_via_shell = self.child_pid.get().is_some()
+        let rendered_via_shell = allow_shell_integration
+            && self.child_pid.get().is_some()
             && matches!(shell.as_str(), "bash" | "rbash")
             && util::write_live_banner(&rendered).is_some();
 

@@ -4,6 +4,10 @@ mod constants;
 mod context;
 mod history;
 mod layout;
+#[cfg(not(windows))]
+mod preferences;
+#[cfg(windows)]
+#[path = "preferences_windows.rs"]
 mod preferences;
 mod quick_actions;
 mod system_info;
@@ -17,7 +21,8 @@ mod terminal_pane;
 #[path = "terminal_pane_windows.rs"]
 mod terminal_pane;
 
-use adw::prelude::*;
+use gtk::gio;
+use gtk::prelude::*;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -59,9 +64,9 @@ fn command_from_args(args: impl Iterator<Item = OsString>) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
-fn parse_launch_options() -> LaunchOptions {
+fn parse_launch_options_from(args: impl Iterator<Item = OsString>) -> LaunchOptions {
     let mut options = LaunchOptions::default();
-    let mut args = std::env::args_os().skip(1);
+    let mut args = args;
 
     while let Some(arg) = args.next() {
         let text = arg.to_string_lossy();
@@ -102,6 +107,23 @@ fn parse_launch_options() -> LaunchOptions {
 #[cfg(windows)]
 fn configure_windows_runtime_prefix() {
     use std::env;
+    use std::path::Path;
+
+    fn has_runtime_layout(prefix: &Path) -> bool {
+        prefix.join("bin").is_dir()
+            || prefix.join("share").is_dir()
+            || prefix
+                .join("share")
+                .join("glib-2.0")
+                .join("schemas")
+                .exists()
+            || prefix
+                .join("lib")
+                .join("gdk-pixbuf-2.0")
+                .join("2.10.0")
+                .join("loaders")
+                .exists()
+    }
 
     let Ok(exe_path) = env::current_exe() else {
         return;
@@ -109,28 +131,54 @@ fn configure_windows_runtime_prefix() {
     let Some(bin_dir) = exe_path.parent() else {
         return;
     };
-    let Some(prefix) = bin_dir.parent() else {
+
+    let mut candidates = vec![bin_dir.to_path_buf()];
+    if let Some(parent) = bin_dir.parent() {
+        candidates.insert(0, parent.to_path_buf());
+    }
+
+    let Some(prefix) = candidates.into_iter().find(|candidate| has_runtime_layout(candidate))
+    else {
         return;
     };
 
     let share_dir = prefix.join("share");
     let schema_dir = share_dir.join("glib-2.0").join("schemas");
+    let runtime_bin_dir = prefix.join("bin");
     let pixbuf_dir = prefix
         .join("lib")
         .join("gdk-pixbuf-2.0")
         .join("2.10.0")
         .join("loaders");
 
-    let mut xdg_data_dirs = vec![share_dir.clone()];
+    let mut path_entries = Vec::new();
+    if runtime_bin_dir.is_dir() {
+        path_entries.push(runtime_bin_dir);
+    }
+    if let Some(existing) = env::var_os("PATH") {
+        path_entries.extend(env::split_paths(&existing));
+    }
+
+    let mut xdg_data_dirs = Vec::new();
+    if share_dir.is_dir() {
+        xdg_data_dirs.push(share_dir.clone());
+    }
     if let Some(existing) = env::var_os("XDG_DATA_DIRS") {
         xdg_data_dirs.extend(env::split_paths(&existing));
     }
 
     unsafe {
-        env::set_var("GTK_EXE_PREFIX", prefix);
-        env::set_var("GTK_DATA_PREFIX", prefix);
-        env::set_var("GSETTINGS_SCHEMA_DIR", schema_dir);
-        env::set_var("GDK_PIXBUF_MODULEDIR", pixbuf_dir);
+        env::set_var("GTK_EXE_PREFIX", &prefix);
+        env::set_var("GTK_DATA_PREFIX", &prefix);
+        if schema_dir.exists() {
+            env::set_var("GSETTINGS_SCHEMA_DIR", schema_dir);
+        }
+        if pixbuf_dir.exists() {
+            env::set_var("GDK_PIXBUF_MODULEDIR", pixbuf_dir);
+        }
+        if let Ok(joined) = env::join_paths(path_entries) {
+            env::set_var("PATH", joined);
+        }
         if let Ok(joined) = env::join_paths(xdg_data_dirs) {
             env::set_var("XDG_DATA_DIRS", joined);
         }
@@ -140,14 +188,12 @@ fn configure_windows_runtime_prefix() {
 fn main() -> gtk::glib::ExitCode {
     #[cfg(windows)]
     configure_windows_runtime_prefix();
+    #[cfg(not(windows))]
+    let _ = adw::init();
 
-    let launch_options = parse_launch_options();
-    if let Some(working_directory) = &launch_options.working_directory {
-        let _ = std::env::set_current_dir(working_directory);
-    }
-
-    let app = adw::Application::builder()
+    let app = gtk::Application::builder()
         .application_id(constants::APP_ID)
+        .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
 
     app.connect_startup(|_| {
@@ -162,8 +208,26 @@ fn main() -> gtk::glib::ExitCode {
         gtk::Window::set_default_icon_name(constants::APP_ICON);
     });
 
-    app.connect_activate(move |app| {
-        window::MainWindow::present(app, launch_options.startup_command.clone());
+    app.connect_activate(|app| {
+        if app.active_window().is_none() {
+            window::MainWindow::present(app, None, None);
+        }
+    });
+
+    app.connect_command_line(|app, command_line| {
+        let mut launch_options =
+            parse_launch_options_from(command_line.arguments().into_iter().skip(1));
+        if launch_options.working_directory.is_none() {
+            launch_options.working_directory = command_line.cwd();
+        }
+
+        window::MainWindow::present(
+            app,
+            launch_options.startup_command.clone(),
+            launch_options.working_directory.clone(),
+        );
+
+        gtk::glib::ExitCode::SUCCESS
     });
 
     app.run()

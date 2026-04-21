@@ -1,10 +1,10 @@
 # VoidShell
 
-VoidShell es un emulador de terminal real escrito en Rust con `GTK4 + libadwaita + VTE`. Cada panel corre una PTY real, el layout usa un árbol binario simple, y la capa de UI añade contexto visual, historial, command palette y control rápido de paneles.
+VoidShell es un emulador de terminal escrito en Rust con `GTK4`. En Linux usa `libadwaita + VTE` para una PTY real por panel; en Windows usa `GTK4` puro y un backend nativo de shell mientras madura la capa multiplataforma. El layout usa un árbol binario simple y la UI añade contexto visual, historial, command palette y control rápido de paneles.
 
 ## Qué trae ahora
 
-- PTY real por panel usando `vte4`
+- PTY real por panel usando `vte4` en Linux y backend nativo de shell en Windows
 - Splits horizontales y verticales
 - Reordenado de paneles por teclado y drag & drop desde el header del panel
 - Zoom/fullscreen por panel sin fullscreen global de la ventana
@@ -20,9 +20,13 @@ VoidShell es un emulador de terminal real escrito en Rust con `GTK4 + libadwaita
 - Integración de Readline para shells tipo bash con búsqueda/autocompletado desde historial
 - Logo e icono propios con `assets/branding/logo.png` y tamaños de app en `assets/icons/hicolor/...`
 
-## Dependencias del sistema
+## Plataformas y dependencias
 
-En Linux necesitas tener disponibles `GTK4`, `libadwaita` y `VTE GTK4` desde el gestor de paquetes de tu distro. En Fedora, por ejemplo:
+Linux:
+
+- Necesitas `GTK4`, `libadwaita` y `VTE GTK4` desde el gestor de paquetes de tu distro.
+- El nombre exacto de los paquetes cambia entre Fedora, Arch, Debian, Ubuntu y otras distros, pero siempre necesitas los equivalentes de `gtk4`, `libadwaita`, `vte gtk4`, `graphene`, `pkg-config` y una toolchain de Rust/C.
+- Ejemplo en Fedora:
 
 ```bash
 sudo dnf install \
@@ -36,11 +40,62 @@ Para detección ampliada de hardware, quick actions e IP pública:
 sudo dnf install pciutils git openssh-clients curl docker podman htop neovim
 ```
 
+Windows:
+
+- El proyecto usa el backend de `src/terminal_pane_windows.rs`, así que no depende de `VTE`.
+- En Windows no depende de `libadwaita`; la UI cae a `GTK4` puro.
+- Necesitas `GTK4` para `gtk4-rs` y una toolchain de Rust para Windows.
+- Si vas a ejecutar el `.exe` fuera del entorno de build, también necesitas el runtime de GTK4 o un bundle con `bin`, `share` y `lib`.
+
 ## Build y ejecución
 
 ```bash
 cargo check
 cargo run
+```
+
+Build nativo en Windows:
+
+```powershell
+cargo build --release
+```
+
+Cross-build a Windows desde Linux con MinGW:
+
+Necesitas una toolchain MinGW con `gtk4`. En Fedora, por ejemplo:
+
+```bash
+sudo dnf install mingw64-gcc mingw64-gtk4 pkgconf-pkg-config
+```
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+
+PKG_CONFIG=x86_64-w64-mingw32-pkg-config \
+PKG_CONFIG_ALLOW_CROSS=1 \
+CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
+El `.exe` resultante queda en:
+
+```text
+target/x86_64-pc-windows-gnu/release/termvoid.exe
+```
+
+También puedes abrir VoidShell ya ubicado en una carpeta o ejecutando un comando al arrancar:
+
+```bash
+cargo run -- --working-directory /ruta/al/proyecto
+cargo run -- --execute "htop"
+cargo run -- --working-directory /ruta/al/proyecto --execute "git status"
+```
+
+En Windows se usan los mismos flags:
+
+```powershell
+cargo run -- --working-directory "C:\Users\tuusuario\proyecto"
+cargo run -- --execute "git status"
 ```
 
 ## Atajos principales
@@ -57,10 +112,38 @@ cargo run
 - `Alt+I`: imprimir el banner ASCII con info en el panel activo
 - `Alt+C`: copiar
 - `Alt+P`: pegar
+- `Ctrl+Shift+A`: seleccionar todo el contenido del panel activo
+- `Ctrl+Shift+C`: copiar selección del panel activo
+- `Ctrl+Shift+V`: pegar en el panel activo
 - `Alt+,`: preferencias
 - `Alt+R`: recargar configuración
 - `Alt+1..9`: enfocar panel por índice
 - `Alt+Space` o `Ctrl+Shift+P`: command palette
+
+## Accesos directos y atajos del sistema
+
+Linux:
+
+- VoidShell instala un `.desktop` local en `$XDG_DATA_HOME/applications` o, si no existe esa variable, en `~/.local/share/applications`.
+- Ese launcher ya entiende `--working-directory` y `--execute`, así que puedes reutilizarlo o copiar su comando para tu desktop environment.
+- Para crear un atajo global de teclado en GNOME, KDE, XFCE, Cinnamon, MATE, i3, sway o similares, crea un shortcut personalizado que ejecute algo como esto:
+
+```bash
+/ruta/al/binario/termvoid --working-directory /ruta/al/proyecto --execute "git status"
+```
+
+- Si no quieres arrancar un comando, deja solo `--working-directory`.
+
+Windows:
+
+- Crea un acceso directo a `termvoid.exe`.
+- En el campo `Target` puedes dejar algo como:
+
+```text
+"C:\ruta\termvoid.exe" --working-directory "C:\ruta\proyecto" --execute "git status"
+```
+
+- Abre `Properties` del acceso directo y usa `Shortcut key` para asignarle una combinación del sistema.
 
 ## Comandos internos de la palette
 
@@ -128,6 +211,8 @@ Caché de IP pública e integración de Readline:
 
 El nombre visible ya es `VoidShell`, pero las rutas siguen usando `TermVoid` para no romper compatibilidad con instalaciones previas.
 
+En Windows, configuración e historial se guardan en las rutas que resuelve `ProjectDirs` bajo `AppData`.
+
 ## Repo
 
 Código publicado en:
@@ -149,4 +234,4 @@ https://github.com/Rodri040409/bspwm-VoidShell.git
 - El autocompletado por historial mejorado está pensado para shells tipo bash/readline; no todos los shells lo usarán igual.
 - La ayuda con `sudo` es heurística y está orientada a comandos administrativos comunes en bash; no intercepta de forma perfecta cualquier binario arbitrario.
 - La reorganización por mouse hoy intercambia paneles completos; todavía no existe un editor visual del árbol o arrastre libre del divisor.
-- La app ya evita depender de `/proc` para parte de la info del sistema cuando no está en Linux, pero la UI sigue basada en `GTK4 + libadwaita + VTE`; eso la deja Linux-first hasta hacer una capa de terminal realmente multiplataforma.
+- Linux tiene hoy el backend más completo porque usa `VTE` con PTY real; Windows ya está soportado, pero sigue usando un backend propio mientras madura la capa multiplataforma.

@@ -179,14 +179,25 @@ pub fn write_live_banner(payload: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+#[cfg(not(windows))]
+fn linux_data_home() -> Option<PathBuf> {
+    env::var_os("XDG_DATA_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join(".local/share")))
+}
+
+#[cfg(not(windows))]
 pub fn install_local_desktop_integration() -> Option<()> {
-    let home = home_dir()?;
+    let data_home = linux_data_home()?;
     let source_icons_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/icons/hicolor");
-    let desktop_target = home.join(format!(
-        ".local/share/applications/{}.desktop",
-        constants::APP_ID
-    ));
-    let pixmaps_target = home.join(format!(".local/share/pixmaps/{}.png", constants::APP_ICON));
+    let applications_dir = data_home.join("applications");
+    let icons_root = data_home.join("icons");
+    let hicolor_root = icons_root.join("hicolor");
+    let desktop_target = applications_dir.join(format!("{}.desktop", constants::APP_ID));
+    let pixmaps_target = data_home
+        .join("pixmaps")
+        .join(format!("{}.png", constants::APP_ICON));
     let current_exe = env::current_exe().ok()?;
 
     if let Some(parent) = desktop_target.parent() {
@@ -205,8 +216,7 @@ pub fn install_local_desktop_integration() -> Option<()> {
             continue;
         }
 
-        let target = home
-            .join(".local/share/icons/hicolor")
+        let target = hicolor_root
             .join(size)
             .join("apps")
             .join(format!("{}.png", constants::APP_ICON));
@@ -221,7 +231,7 @@ pub fn install_local_desktop_integration() -> Option<()> {
     }
 
     let desktop_content = format!(
-        "[Desktop Entry]\nName={name}\nComment=VoidShell tiling terminal for Fedora GNOME\nExec={exec}\nIcon={icon}\nTerminal=false\nType=Application\nCategories=System;TerminalEmulator;GTK;\nMimeType=x-scheme-handler/terminal;\nStartupNotify=true\nStartupWMClass={wm_class}\nX-ExecArg=--execute\nX-TerminalArgDir=--working-directory\n",
+        "[Desktop Entry]\nName={name}\nComment=VoidShell tiling terminal with contextual chrome\nExec={exec} %F\nIcon={icon}\nTerminal=false\nType=Application\nCategories=System;TerminalEmulator;GTK;\nKeywords=terminal;shell;console;pty;\nMimeType=x-scheme-handler/terminal;inode/directory;\nStartupNotify=true\nStartupWMClass={wm_class}\nX-ExecArg=--execute\nX-TerminalArgDir=--working-directory\n",
         name = constants::APP_NAME,
         exec = desktop_exec_value(&current_exe),
         icon = constants::APP_ICON,
@@ -231,18 +241,23 @@ pub fn install_local_desktop_integration() -> Option<()> {
 
     if command_exists("update-desktop-database") {
         let _ = std::process::Command::new("update-desktop-database")
-            .arg(home.join(".local/share/applications"))
+            .arg(&applications_dir)
             .output();
     }
 
     if command_exists("gtk-update-icon-cache") {
         let _ = std::process::Command::new("gtk-update-icon-cache")
             .args(["-f", "-t"])
-            .arg(home.join(".local/share/icons/hicolor"))
+            .arg(&hicolor_root)
             .output();
     }
 
     Some(())
+}
+
+#[cfg(windows)]
+pub fn install_local_desktop_integration() -> Option<()> {
+    None
 }
 
 pub fn display_path(path: &Path) -> String {

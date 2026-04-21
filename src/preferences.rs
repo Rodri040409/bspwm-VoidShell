@@ -9,7 +9,7 @@ pub struct PreferenceCallbacks {
 }
 
 pub fn build_dialog(
-    parent: &adw::ApplicationWindow,
+    parent: &gtk::ApplicationWindow,
     current_config: &AppConfig,
     callbacks: PreferenceCallbacks,
 ) -> adw::PreferencesDialog {

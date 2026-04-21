@@ -10,23 +10,26 @@ use crate::quick_actions::{
 use crate::terminal_pane::{PaneCallbacks, PaneSpawnMotion, TerminalPane};
 use crate::theme;
 use crate::util;
-use adw::prelude::*;
+#[cfg(not(windows))]
+use adw::prelude::AdwDialogExt;
 use gtk::gio;
+use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 pub struct MainWindow;
 
 struct WindowState {
-    app: adw::Application,
-    window: adw::ApplicationWindow,
-    toast_overlay: adw::ToastOverlay,
+    app: gtk::Application,
+    window: gtk::ApplicationWindow,
     layout_surface: gtk::Overlay,
     shared_wallpaper: gtk::Picture,
     shared_wallpaper_tint: gtk::Box,
     layout_host: gtk::Box,
-    title_widget: adw::WindowTitle,
+    title_label: gtk::Label,
+    subtitle_label: gtk::Label,
     layout: RefCell<TileTree>,
     panes: RefCell<BTreeMap<u64, Rc<TerminalPane>>>,
     focused_pane: Cell<Option<u64>>,
@@ -43,18 +46,30 @@ struct WindowState {
     palette_search: gtk::SearchEntry,
     palette_list: gtk::ListBox,
     palette_items: RefCell<Vec<QuickActionItem>>,
+    toast_revealer: gtk::Revealer,
+    toast_label: gtk::Label,
+    toast_serial: Cell<u64>,
     startup_command: Option<String>,
+    working_directory: Option<PathBuf>,
 }
 
 impl MainWindow {
-    pub fn present(app: &adw::Application, startup_command: Option<String>) {
-        let state = WindowState::new(app.clone(), startup_command);
+    pub fn present(
+        app: &gtk::Application,
+        startup_command: Option<String>,
+        working_directory: Option<PathBuf>,
+    ) {
+        let state = WindowState::new(app.clone(), startup_command, working_directory);
         state.window.present();
     }
 }
 
 impl WindowState {
-    fn new(app: adw::Application, startup_command: Option<String>) -> Rc<Self> {
+    fn new(
+        app: gtk::Application,
+        startup_command: Option<String>,
+        working_directory: Option<PathBuf>,
+    ) -> Rc<Self> {
         let config_manager = ConfigManager::new();
         let history_manager = HistoryManager::new();
         let config = config_manager.load_or_default();
@@ -62,7 +77,7 @@ impl WindowState {
 
         theme::install_or_update(&config);
 
-        let window = adw::ApplicationWindow::builder()
+        let window = gtk::ApplicationWindow::builder()
             .application(&app)
             .default_width(1480)
             .default_height(920)
@@ -70,11 +85,24 @@ impl WindowState {
             .icon_name(constants::APP_ICON)
             .build();
 
-        let title_widget = adw::WindowTitle::new(constants::APP_NAME, "");
-        let header = adw::HeaderBar::new();
+        let title_label = gtk::Label::new(Some(constants::APP_NAME));
+        title_label.add_css_class("title");
+        title_label.add_css_class("termvoid-title");
+        title_label.set_xalign(0.0);
+
+        let subtitle_label = gtk::Label::new(None);
+        subtitle_label.add_css_class("subtitle");
+        subtitle_label.set_xalign(0.0);
+        subtitle_label.set_visible(false);
+
+        let title_stack = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        title_stack.append(&title_label);
+        title_stack.append(&subtitle_label);
+
+        let header = gtk::HeaderBar::new();
         header.add_css_class("termvoid-headerbar");
-        header.set_title_widget(Some(&title_widget));
-        title_widget.add_css_class("termvoid-title");
+        header.set_title_widget(Some(&title_stack));
+        window.set_titlebar(Some(&header));
 
         let palette_button = gtk::Button::from_icon_name("system-search-symbolic");
         palette_button.add_css_class("flat");
@@ -117,20 +145,11 @@ impl WindowState {
         shared_wallpaper_tint.set_can_target(false);
         window_surface.add_overlay(&shared_wallpaper_tint);
 
-        let toast_overlay = adw::ToastOverlay::new();
-        let toolbar_view = adw::ToolbarView::new();
-        toolbar_view.add_css_class("window-toolbar-view");
-        toolbar_view.add_top_bar(&header);
-        toolbar_view.set_content(Some(&toast_overlay));
-        toolbar_view.set_hexpand(true);
-        toolbar_view.set_vexpand(true);
-        window_surface.add_overlay(&toolbar_view);
-
         let layout_surface = gtk::Overlay::new();
         layout_surface.add_css_class("layout-surface");
         layout_surface.set_hexpand(true);
         layout_surface.set_vexpand(true);
-        toast_overlay.set_child(Some(&layout_surface));
+        window_surface.add_overlay(&layout_surface);
 
         let layout_host = gtk::Box::new(gtk::Orientation::Vertical, 0);
         layout_host.set_hexpand(true);
@@ -167,17 +186,50 @@ impl WindowState {
         palette_card.append(&palette_scroller);
         palette_revealer.set_child(Some(&palette_card));
 
-        window.set_content(Some(&root_overlay));
+        let toast_revealer = gtk::Revealer::builder()
+            .transition_type(if config.enable_animations {
+                gtk::RevealerTransitionType::SlideUp
+            } else {
+                gtk::RevealerTransitionType::None
+            })
+            .transition_duration((180.0 / config.animation_speed.max(0.2)) as u32)
+            .build();
+        toast_revealer.set_halign(gtk::Align::Center);
+        toast_revealer.set_valign(gtk::Align::End);
+        toast_revealer.set_margin_bottom(24);
+        root_overlay.add_overlay(&toast_revealer);
+
+        let toast_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        toast_box.add_css_class("toast");
+        toast_box.add_css_class("frame");
+        toast_box.add_css_class("card");
+        toast_box.set_margin_start(16);
+        toast_box.set_margin_end(16);
+        toast_box.set_margin_top(8);
+        toast_box.set_margin_bottom(8);
+
+        let toast_label = gtk::Label::new(None);
+        toast_label.set_wrap(true);
+        toast_label.set_xalign(0.0);
+        toast_label.set_max_width_chars(72);
+        toast_label.set_margin_start(14);
+        toast_label.set_margin_end(14);
+        toast_label.set_margin_top(10);
+        toast_label.set_margin_bottom(10);
+        toast_box.append(&toast_label);
+        toast_revealer.set_child(Some(&toast_box));
+
+        window.set_child(Some(&root_overlay));
 
         let state = Rc::new(Self {
             app,
             window,
-            toast_overlay,
             layout_surface,
             shared_wallpaper,
             shared_wallpaper_tint,
             layout_host,
-            title_widget,
+            title_label,
+            subtitle_label,
             layout: RefCell::new(TileTree::default()),
             panes: RefCell::new(BTreeMap::new()),
             focused_pane: Cell::new(None),
@@ -194,7 +246,11 @@ impl WindowState {
             palette_search,
             palette_list,
             palette_items: RefCell::new(Vec::new()),
+            toast_revealer,
+            toast_label,
+            toast_serial: Cell::new(0),
             startup_command,
+            working_directory,
         });
 
         state.install_actions();
@@ -369,7 +425,11 @@ impl WindowState {
     fn create_initial_pane(self: &Rc<Self>) {
         let pane_id = self.allocate_pane_id();
         let shell_path = self.resolved_shell_path();
-        let cwd = std::env::current_dir().ok().or_else(util::home_dir);
+        let cwd = self
+            .working_directory
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .or_else(util::home_dir);
         let pane = TerminalPane::new(
             pane_id,
             shell_path.clone(),
@@ -636,20 +696,22 @@ impl WindowState {
     fn refresh_header(&self) {
         if let Some(pane) = self.focused_pane_ref() {
             let context = pane.context();
-            self.title_widget.set_title(constants::APP_NAME);
+            self.title_label.set_text(constants::APP_NAME);
             let prefix = if self.zoomed_pane.get() == self.focused_pane.get() {
                 "Zoom · "
             } else {
                 ""
             };
-            self.title_widget.set_subtitle(&format!(
+            self.subtitle_label.set_text(&format!(
                 "{prefix}{} · {}",
                 context.header_title(),
                 context.header_subtitle()
             ));
+            self.subtitle_label.set_visible(true);
         } else {
-            self.title_widget.set_title(constants::APP_NAME);
-            self.title_widget.set_subtitle("Sin panel activo");
+            self.title_label.set_text(constants::APP_NAME);
+            self.subtitle_label.set_text("Sin panel activo");
+            self.subtitle_label.set_visible(true);
         }
     }
 
@@ -778,6 +840,7 @@ impl WindowState {
 
     fn open_preferences(self: &Rc<Self>) {
         let weak = Rc::downgrade(self);
+        #[cfg(not(windows))]
         let dialog = preferences::build_dialog(
             &self.window,
             &self.config.borrow(),
@@ -797,20 +860,46 @@ impl WindowState {
                 },
             },
         );
+        #[cfg(not(windows))]
         dialog.present(Some(&self.window));
+
+        #[cfg(windows)]
+        {
+            let dialog = preferences::build_dialog(
+                &self.window,
+                &self.config.borrow(),
+                PreferenceCallbacks {
+                    on_config_changed: Rc::new(move |config| {
+                        if let Some(state) = weak.upgrade() {
+                            state.update_config(config);
+                        }
+                    }),
+                    on_reload_from_disk: {
+                        let weak = Rc::downgrade(self);
+                        Rc::new(move || {
+                            if let Some(state) = weak.upgrade() {
+                                state.reload_config();
+                            }
+                        })
+                    },
+                },
+            );
+            dialog.present();
+        }
     }
 
     fn open_about(&self) {
-        let dialog = adw::AboutDialog::builder()
-            .application_name(constants::APP_NAME)
-            .application_icon(constants::APP_ICON)
-            .developer_name("voidscripter")
+        let dialog = gtk::AboutDialog::builder()
+            .program_name(constants::APP_NAME)
+            .logo_icon_name(constants::APP_ICON)
             .version(constants::APP_VERSION)
             .website("https://github.com/Rodri040409/bspwm-VoidShell")
-            .issue_url("https://github.com/Rodri040409/bspwm-VoidShell/issues")
-            .comments("VoidShell es una terminal real hecha con GTK4, libadwaita y VTE, con paneles en mosaico, chrome contextual y una UX pensada primero para Fedora y GNOME.")
+            .comments("VoidShell es una terminal con paneles en mosaico, chrome contextual y arranque por directorio o comando. En Linux usa VTE; en Windows mantiene un backend nativo mientras madura la capa multiplataforma.")
+            .authors(vec!["voidscripter"])
+            .modal(true)
+            .transient_for(&self.window)
             .build();
-        dialog.present(Some(&self.window));
+        dialog.present();
     }
 
     fn update_config(&self, config: AppConfig) {
@@ -822,6 +911,14 @@ impl WindowState {
         self.palette_revealer
             .set_transition_type(if config.enable_animations {
                 gtk::RevealerTransitionType::SlideDown
+            } else {
+                gtk::RevealerTransitionType::None
+            });
+        self.toast_revealer
+            .set_transition_duration((180.0 / config.animation_speed.max(0.2)) as u32);
+        self.toast_revealer
+            .set_transition_type(if config.enable_animations {
+                gtk::RevealerTransitionType::SlideUp
             } else {
                 gtk::RevealerTransitionType::None
             });
@@ -960,26 +1057,9 @@ impl WindowState {
                 current_section = Some(section);
             }
 
-            let row = adw::ActionRow::builder()
-                .title(&item.title)
-                .subtitle(&item.subtitle)
-                .activatable(true)
-                .build();
-            row.add_css_class("palette-row");
-            row.add_prefix(&build_palette_prefix(section));
-            if let Some(badge) = &item.badge {
-                let label = gtk::Label::new(Some(badge));
-                label.add_css_class("context-badge");
-                row.add_suffix(&label);
-            }
-            if matches!(item.target, ActionTarget::NewPane) {
-                let label = gtk::Label::new(Some("NUEVO"));
-                label.add_css_class("palette-target-badge");
-                row.add_suffix(&label);
-            }
-
+            let row = build_palette_action_row(&item, section);
             let weak = Rc::downgrade(self);
-            row.connect_activated(move |_| {
+            row.connect_activate(move |_| {
                 if let Some(state) = weak.upgrade() {
                     state.execute_quick_action(item.clone());
                 }
@@ -1050,9 +1130,18 @@ impl WindowState {
     }
 
     fn show_toast(&self, message: &str) {
-        let toast = adw::Toast::new(message);
-        toast.set_timeout(2);
-        self.toast_overlay.add_toast(toast);
+        let serial = self.toast_serial.get() + 1;
+        self.toast_serial.set(serial);
+        self.toast_label.set_text(message);
+        self.toast_revealer.set_reveal_child(true);
+
+        let revealer = self.toast_revealer.clone();
+        let serial_cell = self.toast_serial.clone();
+        gtk::glib::timeout_add_local_once(Duration::from_secs(2), move || {
+            if serial_cell.get() == serial {
+                revealer.set_reveal_child(false);
+            }
+        });
     }
 
     fn apply_shared_wallpaper(&self, config: &AppConfig) {
@@ -1447,6 +1536,58 @@ fn build_palette_prefix(section: QuickActionSection) -> gtk::Box {
     icon.add_css_class("palette-row-prefix-icon");
     wrapper.append(&icon);
     wrapper
+}
+
+fn build_palette_action_row(
+    item: &QuickActionItem,
+    section: QuickActionSection,
+) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    row.set_activatable(true);
+    row.add_css_class("palette-row");
+
+    let container = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    container.set_margin_start(12);
+    container.set_margin_end(12);
+    container.set_margin_top(8);
+    container.set_margin_bottom(8);
+    container.append(&build_palette_prefix(section));
+
+    let text_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    text_box.set_hexpand(true);
+
+    let title = gtk::Label::new(Some(&item.title));
+    title.add_css_class("title-4");
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+
+    let subtitle = gtk::Label::new(Some(&item.subtitle));
+    subtitle.add_css_class("dim-label");
+    subtitle.set_xalign(0.0);
+    subtitle.set_wrap(true);
+
+    text_box.append(&title);
+    text_box.append(&subtitle);
+    container.append(&text_box);
+
+    let suffixes = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    suffixes.set_valign(gtk::Align::Center);
+
+    if let Some(badge) = &item.badge {
+        let label = gtk::Label::new(Some(badge));
+        label.add_css_class("context-badge");
+        suffixes.append(&label);
+    }
+    if matches!(item.target, ActionTarget::NewPane) {
+        let label = gtk::Label::new(Some("NUEVO"));
+        label.add_css_class("palette-target-badge");
+        suffixes.append(&label);
+    }
+
+    container.append(&suffixes);
+    row.set_child(Some(&container));
+    row
 }
 
 fn build_palette_empty_row(empty_query: bool) -> gtk::ListBoxRow {
