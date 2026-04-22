@@ -948,10 +948,16 @@ impl TerminalPane {
         allow_shell_integration: bool,
     ) {
         let columns = self.terminal.column_count().max(1) as usize;
+        let detail_mode = if matches!(mode, BannerRenderMode::Startup) {
+            banner::BannerDetailMode::Startup
+        } else {
+            banner::BannerDetailMode::Full
+        };
         let rendered = banner::startup_payload_for_columns(
             &self.shell_path,
             Some(columns),
             self.banner_layout.get(),
+            detail_mode,
         );
 
         let shell = util::shell_name(&self.shell_path).to_ascii_lowercase();

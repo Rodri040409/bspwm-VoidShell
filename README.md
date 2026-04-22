@@ -44,8 +44,9 @@ Windows:
 
 - El proyecto usa el backend de `src/terminal_pane_windows.rs`, así que no depende de `VTE`.
 - En Windows no depende de `libadwaita`; la UI cae a `GTK4` puro.
-- Necesitas `GTK4` para `gtk4-rs` y una toolchain de Rust para Windows.
-- Si vas a ejecutar el `.exe` fuera del entorno de build, también necesitas el runtime de GTK4 o un bundle con `bin`, `share` y `lib`.
+- Necesitas `GTK4` de desarrollo para `gtk4-rs` y una toolchain de Rust para Windows.
+- Si ves `failed to run custom build command for gsk4-sys`, normalmente falta el sysroot GTK4 correcto o `pkg-config` no está apuntando al wrapper del target.
+- Si ves `No se encontró libgdk_pixbuf-2.0-0.dll`, el `.exe` se está lanzando sin el runtime de GTK4; no basta con copiar solo `termvoid.exe`.
 
 ## Build y ejecución
 
@@ -56,8 +57,16 @@ cargo run
 
 Build nativo en Windows:
 
-```powershell
-cargo build --release
+Usa una shell `MSYS2 UCRT64`, no un `cmd` o PowerShell pelado sin GTK.
+
+```bash
+pacman -S --needed \
+  mingw-w64-ucrt-x86_64-gcc \
+  mingw-w64-ucrt-x86_64-pkgconf \
+  mingw-w64-ucrt-x86_64-gtk4
+
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu
 ```
 
 Cross-build a Windows desde Linux con MinGW:
@@ -70,18 +79,26 @@ sudo dnf install mingw64-gcc mingw64-gtk4 pkgconf-pkg-config
 
 ```bash
 rustup target add x86_64-pc-windows-gnu
-
-PKG_CONFIG=x86_64-w64-mingw32-pkg-config \
-PKG_CONFIG_ALLOW_CROSS=1 \
-CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
-cargo build --release --target x86_64-pc-windows-gnu
+./scripts/build-windows-gnu.sh
 ```
 
-El `.exe` resultante queda en:
+El script genera un bundle portable con esta forma:
 
 ```text
-target/x86_64-pc-windows-gnu/release/termvoid.exe
+dist/windows-gnu/termvoid-x86_64-pc-windows-gnu-release/
+  termvoid.exe
+  bin/
+  share/
+  lib/
 ```
+
+Si tu distro instala MinGW en otra ruta, puedes indicarla así:
+
+```bash
+MINGW_PREFIX=/usr/x86_64-w64-mingw32/sys-root/mingw ./scripts/build-windows-gnu.sh
+```
+
+Ese layout coincide con la autodetección de runtime que hace `src/main.rs`, así que puedes comprimir esa carpeta y ejecutar `termvoid.exe` directamente en Windows.
 
 También puedes abrir VoidShell ya ubicado en una carpeta o ejecutando un comando al arrancar:
 
@@ -97,6 +114,11 @@ En Windows se usan los mismos flags:
 cargo run -- --working-directory "C:\Users\tuusuario\proyecto"
 cargo run -- --execute "git status"
 ```
+
+## Troubleshooting Windows
+
+- `error: failed to run custom build command for gsk4-sys`: el target encontró `gtk4-rs`, pero no encontró un sysroot GTK4 válido para ese target. En Windows nativo compila desde `MSYS2 UCRT64`; en Linux usa `./scripts/build-windows-gnu.sh` o exporta `PKG_CONFIG=x86_64-w64-mingw32-pkg-config` junto con `PKG_CONFIG_ALLOW_CROSS=1`.
+- `La ejecución de código no puede continuar porque no se encontró libgdk_pixbuf-2.0-0.dll`: estás intentando abrir el binario sin el runtime GTK. Ejecuta el `.exe` desde un bundle que incluya `bin/`, `share/` y `lib/`, no solo el `.exe`.
 
 ## Atajos principales
 

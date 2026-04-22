@@ -33,12 +33,22 @@ const VALUE: &str = "\x1b[38;2;241;235;255m";
 const DIVIDER: &str = "\x1b[38;2;110;93;150m";
 const DIM: &str = "\x1b[38;2;151;137;179m";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BannerDetailMode {
+    Startup,
+    Full,
+}
+
 pub fn startup_payload_for_columns(
     shell_path: &str,
     columns: Option<usize>,
     layout: BannerInfoLayout,
+    detail_mode: BannerDetailMode,
 ) -> String {
-    let info = SystemInfo::collect(shell_path);
+    let info = match detail_mode {
+        BannerDetailMode::Startup => SystemInfo::collect_startup(shell_path),
+        BannerDetailMode::Full => SystemInfo::collect(shell_path),
+    };
     let art_lines: Vec<&str> = STARTUP_ART.lines().collect();
     let art_width = art_lines
         .iter()

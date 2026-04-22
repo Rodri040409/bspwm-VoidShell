@@ -23,9 +23,20 @@ pub struct SystemInfo {
 
 impl SystemInfo {
     pub fn collect(shell_path: &str) -> Self {
+        Self::collect_with_mode(shell_path, SystemInfoCollectionMode::Full)
+    }
+
+    pub fn collect_startup(shell_path: &str) -> Self {
+        Self::collect_with_mode(shell_path, SystemInfoCollectionMode::Startup)
+    }
+
+    fn collect_with_mode(shell_path: &str, mode: SystemInfoCollectionMode) -> Self {
         let cache_key = util::shell_name(shell_path);
         let now = util::now_epoch_seconds();
-        let max_age_seconds = 45;
+        let max_age_seconds = match mode {
+            SystemInfoCollectionMode::Startup => 12,
+            SystemInfoCollectionMode::Full => 45,
+        };
 
         if let Some(cached) = SYSTEM_INFO_CACHE.with(|cache| {
             cache
@@ -38,20 +49,26 @@ impl SystemInfo {
             return cached;
         }
 
-        let collected = Self {
-            distro: util::platform_display_name()
-                .unwrap_or_else(|| "Distro desconocida".to_string()),
-            kernel: util::kernel_release().unwrap_or_else(|| "Kernel desconocido".to_string()),
-            gnome: util::command_output("gnome-shell", &["--version"])
-                .or_else(|| util::command_output("gnome-session", &["--version"]))
+        let mut collected = base_system_info(shell_path);
+        collected.gnome = match mode {
+            SystemInfoCollectionMode::Startup => detect_desktop_environment_label()
+                .unwrap_or_else(|| "Entorno no detectado".to_string()),
+            SystemInfoCollectionMode::Full => detect_gnome_version()
+                .or_else(detect_desktop_environment_label)
                 .unwrap_or_else(|| "Versión de GNOME no disponible".to_string()),
-            cpu: util::cpu_description().unwrap_or_else(|| "CPU desconocida".to_string()),
-            ram: util::mem_total_gib_portable().unwrap_or_else(|| "RAM desconocida".to_string()),
-            gpu: detect_gpu().unwrap_or_else(|| "GPU no detectada".to_string()),
-            local_ip: util::primary_local_ip().unwrap_or_else(|| "No disponible".to_string()),
-            public_ip: util::cached_public_ip(900).unwrap_or_else(|| "No disponible".to_string()),
-            hostname: util::hostname(),
-            shell: util::shell_name(shell_path),
+        };
+        collected.gpu = match mode {
+            SystemInfoCollectionMode::Startup => "GPU en segundo plano".to_string(),
+            SystemInfoCollectionMode::Full => {
+                detect_gpu().unwrap_or_else(|| "GPU no detectada".to_string())
+            }
+        };
+        collected.public_ip = match mode {
+            SystemInfoCollectionMode::Startup => util::cached_public_ip_cached_only(900)
+                .unwrap_or_else(|| "No disponible".to_string()),
+            SystemInfoCollectionMode::Full => {
+                util::cached_public_ip(900).unwrap_or_else(|| "No disponible".to_string())
+            }
         };
 
         SYSTEM_INFO_CACHE.with(|cache| {
@@ -62,6 +79,40 @@ impl SystemInfo {
 
         collected
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SystemInfoCollectionMode {
+    Startup,
+    Full,
+}
+
+fn base_system_info(shell_path: &str) -> SystemInfo {
+    SystemInfo {
+        distro: util::platform_display_name().unwrap_or_else(|| "Distro desconocida".to_string()),
+        kernel: util::kernel_release().unwrap_or_else(|| "Kernel desconocido".to_string()),
+        gnome: String::new(),
+        cpu: util::cpu_description().unwrap_or_else(|| "CPU desconocida".to_string()),
+        ram: util::mem_total_gib_portable().unwrap_or_else(|| "RAM desconocida".to_string()),
+        gpu: String::new(),
+        local_ip: util::primary_local_ip().unwrap_or_else(|| "No disponible".to_string()),
+        public_ip: String::new(),
+        hostname: util::hostname(),
+        shell: util::shell_name(shell_path),
+    }
+}
+
+fn detect_gnome_version() -> Option<String> {
+    util::command_output("gnome-shell", &["--version"])
+        .or_else(|| util::command_output("gnome-session", &["--version"]))
+}
+
+fn detect_desktop_environment_label() -> Option<String> {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .ok()
+        .or_else(|| std::env::var("DESKTOP_SESSION").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn detect_gpu() -> Option<String> {

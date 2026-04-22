@@ -199,6 +199,14 @@ pub fn install_local_desktop_integration() -> Option<()> {
         .join("pixmaps")
         .join(format!("{}.png", constants::APP_ICON));
     let current_exe = env::current_exe().ok()?;
+    let desktop_content = format!(
+        "[Desktop Entry]\nName={name}\nComment=VoidShell tiling terminal with contextual chrome\nExec={exec} %F\nIcon={icon}\nTerminal=false\nType=Application\nCategories=System;TerminalEmulator;GTK;\nKeywords=terminal;shell;console;pty;\nMimeType=x-scheme-handler/terminal;inode/directory;\nStartupNotify=true\nStartupWMClass={wm_class}\nX-ExecArg=--execute\nX-TerminalArgDir=--working-directory\n",
+        name = constants::APP_NAME,
+        exec = desktop_exec_value(&current_exe),
+        icon = constants::APP_ICON,
+        wm_class = constants::APP_ID,
+    );
+    let mut updated = false;
 
     if let Some(parent) = desktop_target.parent() {
         fs::create_dir_all(parent).ok()?;
@@ -223,29 +231,25 @@ pub fn install_local_desktop_integration() -> Option<()> {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).ok()?;
         }
-        let _ = fs::copy(&source, &target);
+        updated |= sync_file_if_needed(&source, &target);
 
         if size == "256x256" {
-            let _ = fs::copy(&source, &pixmaps_target);
+            updated |= sync_file_if_needed(&source, &pixmaps_target);
         }
     }
 
-    let desktop_content = format!(
-        "[Desktop Entry]\nName={name}\nComment=VoidShell tiling terminal with contextual chrome\nExec={exec} %F\nIcon={icon}\nTerminal=false\nType=Application\nCategories=System;TerminalEmulator;GTK;\nKeywords=terminal;shell;console;pty;\nMimeType=x-scheme-handler/terminal;inode/directory;\nStartupNotify=true\nStartupWMClass={wm_class}\nX-ExecArg=--execute\nX-TerminalArgDir=--working-directory\n",
-        name = constants::APP_NAME,
-        exec = desktop_exec_value(&current_exe),
-        icon = constants::APP_ICON,
-        wm_class = constants::APP_ID,
-    );
-    let _ = fs::write(&desktop_target, desktop_content);
+    if fs::read_to_string(&desktop_target).ok().as_deref() != Some(&desktop_content) {
+        let _ = fs::write(&desktop_target, desktop_content);
+        updated = true;
+    }
 
-    if command_exists("update-desktop-database") {
+    if updated && command_exists("update-desktop-database") {
         let _ = std::process::Command::new("update-desktop-database")
             .arg(&applications_dir)
             .output();
     }
 
-    if command_exists("gtk-update-icon-cache") {
+    if updated && command_exists("gtk-update-icon-cache") {
         let _ = std::process::Command::new("gtk-update-icon-cache")
             .args(["-f", "-t"])
             .arg(&hicolor_root)
@@ -492,6 +496,13 @@ pub fn cached_public_ip(max_age_seconds: u64) -> Option<String> {
     stale.map(|(_, value)| value)
 }
 
+pub fn cached_public_ip_cached_only(max_age_seconds: u64) -> Option<String> {
+    let path = project_state_file("public-ip.txt");
+    let (timestamp, value) = read_public_ip_cache(&path)?;
+    let now = now_epoch_seconds();
+    (now.saturating_sub(timestamp) <= max_age_seconds).then_some(value)
+}
+
 pub fn readline_inputrc(shell_path: &str) -> Option<String> {
     let shell = shell_name(shell_path).to_ascii_lowercase();
     if !matches!(shell.as_str(), "bash" | "sh" | "rbash") {
@@ -704,6 +715,17 @@ fn read_public_ip_cache(path: &Path) -> Option<(u64, String)> {
     let timestamp = lines.next()?.trim().parse::<u64>().ok()?;
     let value = lines.next()?.trim().to_string();
     (!value.is_empty()).then_some((timestamp, value))
+}
+
+fn sync_file_if_needed(source: &Path, target: &Path) -> bool {
+    let source_bytes = fs::read(source).ok();
+    let target_bytes = fs::read(target).ok();
+
+    if source_bytes.is_some() && source_bytes == target_bytes {
+        return false;
+    }
+
+    fs::copy(source, target).is_ok()
 }
 
 fn write_public_ip_cache(path: &Path, value: &str) {

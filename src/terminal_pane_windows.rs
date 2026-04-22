@@ -37,6 +37,12 @@ pub enum PaneSpawnMotion {
     FromBottom,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BannerRenderMode {
+    Startup,
+    Manual,
+}
+
 enum ShellEvent {
     Output(String),
     Exited(i32),
@@ -302,7 +308,7 @@ impl TerminalPane {
     }
 
     pub fn show_banner_info(&self) {
-        self.render_banner(true, true);
+        self.render_banner(BannerRenderMode::Manual, true, true);
         self.focus_terminal();
     }
 
@@ -682,7 +688,7 @@ impl TerminalPane {
                 });
 
                 if show_banner {
-                    self.render_banner(false, false);
+                    self.render_banner(BannerRenderMode::Startup, false, false);
                 }
 
                 let mut commands = self.pending_commands.borrow_mut();
@@ -945,11 +951,17 @@ impl TerminalPane {
             .set_visible(!dense || self.is_active.get());
     }
 
-    fn render_banner(&self, focus_terminal: bool, flash: bool) {
+    fn render_banner(&self, mode: BannerRenderMode, focus_terminal: bool, flash: bool) {
+        let detail_mode = if matches!(mode, BannerRenderMode::Startup) {
+            banner::BannerDetailMode::Startup
+        } else {
+            banner::BannerDetailMode::Full
+        };
         let rendered = banner::startup_payload_for_columns(
             &self.shell_path,
             Some(100),
             self.banner_layout.get(),
+            detail_mode,
         );
         self.append_output("\n");
         self.append_output(&rendered);
