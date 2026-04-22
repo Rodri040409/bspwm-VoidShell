@@ -4,6 +4,7 @@ use crate::constants;
 use crate::context::{self, PanelContext, PanelMode};
 use crate::theme;
 use crate::util;
+use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
@@ -13,6 +14,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 use vte::prelude::*;
+
+const LINK_REGEX_PATTERN: &str =
+    r#"(?i)\b(?:[a-z][a-z0-9+.-]*://|mailto:|www\.)[^\s<>'"`()\[\]{}]+"#;
+const OUTPUT_CONTEXT_REFRESH_DEBOUNCE_MS: u64 = 220;
 
 #[derive(Clone)]
 pub struct PaneCallbacks {
@@ -33,6 +38,12 @@ pub enum PaneSpawnMotion {
     FromBottom,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BannerRenderMode {
+    Startup,
+    Manual,
+}
+
 pub struct TerminalPane {
     id: u64,
     revealer: gtk::Revealer,
@@ -45,6 +56,7 @@ pub struct TerminalPane {
     chrome: gtk::Box,
     title_label: gtk::Label,
     subtitle_label: gtk::Label,
+    network_label: gtk::Label,
     badge_box: gtk::Box,
     callbacks: PaneCallbacks,
     shell_path: String,
@@ -53,6 +65,7 @@ pub struct TerminalPane {
     context: RefCell<PanelContext>,
     context_tick: Cell<u64>,
     output_pulse_pending: Cell<bool>,
+    output_context_refresh_pending: Cell<bool>,
     is_active: Cell<bool>,
     compact_mode: Cell<bool>,
     dense_mode: Cell<bool>,
@@ -155,7 +168,17 @@ impl TerminalPane {
         subtitle_label.set_xalign(0.0);
         subtitle_label.set_visible(false);
         subtitle_label.set_can_target(false);
+        let network_label = gtk::Label::new(Some(""));
+        network_label.add_css_class("pane-network");
+        network_label.set_xalign(0.0);
+        network_label.set_hexpand(true);
+        network_label.set_single_line_mode(true);
+        network_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        network_label.set_visible(false);
+        network_label.set_can_target(false);
         title_stack.append(&title_label);
+        title_stack.append(&subtitle_label);
+        title_stack.append(&network_label);
         chrome.append(&title_stack);
 
         let badge_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -178,6 +201,7 @@ impl TerminalPane {
             chrome,
             title_label,
             subtitle_label,
+            network_label,
             badge_box,
             callbacks,
             shell_path,
@@ -186,6 +210,7 @@ impl TerminalPane {
             context: RefCell::new(PanelContext::default()),
             context_tick: Cell::new(0),
             output_pulse_pending: Cell::new(false),
+            output_context_refresh_pending: Cell::new(false),
             is_active: Cell::new(false),
             compact_mode: Cell::new(false),
             dense_mode: Cell::new(false),
@@ -198,6 +223,7 @@ impl TerminalPane {
 
         pane.apply_config(config);
         pane.install_focus_handlers();
+        pane.install_link_handlers();
         pane.install_drag_handlers();
         pane.install_keyboard_shortcuts();
         pane.install_runtime_handlers();
@@ -263,7 +289,7 @@ impl TerminalPane {
     }
 
     pub fn show_banner_info(&self) {
-        self.render_banner(true, true, true);
+        self.render_banner(BannerRenderMode::Manual, true, true, true);
         self.focus_terminal();
     }
 
@@ -432,6 +458,49 @@ impl TerminalPane {
         });
     }
 
+    fn install_link_handlers(self: &Rc<Self>) {
+        let regex = match vte::Regex::for_match(
+            LINK_REGEX_PATTERN,
+            vte::ffi::VTE_REGEX_FLAGS_DEFAULT as u32,
+        ) {
+            Ok(regex) => regex,
+            Err(error) => {
+                (self.callbacks.on_notification)(format!(
+                    "No se pudo activar la deteccion de enlaces: {error}"
+                ));
+                return;
+            }
+        };
+        let tag = self.terminal.match_add_regex(&regex, 0);
+        self.terminal.match_set_cursor_name(tag, "pointer");
+
+        let click = gtk::GestureClick::new();
+        click.set_button(1);
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(self);
+        click.connect_pressed(move |gesture, _, x, y| {
+            if !gesture
+                .current_event_state()
+                .contains(gtk::gdk::ModifierType::CONTROL_MASK)
+            {
+                return;
+            }
+
+            let Some(pane) = weak.upgrade() else {
+                return;
+            };
+            let Some(uri) = pane.link_at_position(x, y) else {
+                return;
+            };
+
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            pane.focus_terminal();
+            (pane.callbacks.on_focus)(pane.id);
+            pane.open_link(&uri);
+        });
+        self.terminal.add_controller(click);
+    }
+
     fn install_drag_handlers(self: &Rc<Self>) {
         let drag_source = gtk::DragSource::new();
         drag_source.set_actions(gtk::gdk::DragAction::MOVE);
@@ -550,6 +619,7 @@ impl TerminalPane {
         self.terminal.connect_contents_changed(move |_| {
             if let Some(pane) = weak.upgrade() {
                 pane.pulse_output();
+                pane.schedule_output_context_refresh();
             }
         });
 
@@ -572,6 +642,31 @@ impl TerminalPane {
         });
     }
 
+    fn link_at_position(&self, x: f64, y: f64) -> Option<String> {
+        self.terminal
+            .check_hyperlink_at(x, y)
+            .map(|uri| uri.to_string())
+            .or_else(|| {
+                let (uri, _) = self.terminal.check_match_at(x, y);
+                uri.map(|value| value.to_string())
+            })
+            .and_then(|uri| normalize_link_target(&uri))
+    }
+
+    fn open_link(&self, uri: &str) {
+        let notify = self.callbacks.on_notification.clone();
+        let launcher = gtk::UriLauncher::new(uri);
+        let parent = self
+            .revealer
+            .root()
+            .and_then(|root| root.downcast::<gtk::Window>().ok());
+        launcher.launch(parent.as_ref(), None::<&gio::Cancellable>, move |result| {
+            if let Err(error) = result {
+                notify(format!("No se pudo abrir el enlace: {error}"));
+            }
+        });
+    }
+
     fn schedule_context_refresh(self: &Rc<Self>) {
         let weak = Rc::downgrade(self);
         let delay = self.context_refresh_delay_ms();
@@ -581,6 +676,38 @@ impl TerminalPane {
                 pane.schedule_context_refresh();
             }
         });
+    }
+
+    fn schedule_output_context_refresh(self: &Rc<Self>) {
+        if !self.should_refresh_context_from_output() {
+            return;
+        }
+
+        if self.output_context_refresh_pending.replace(true) {
+            return;
+        }
+
+        let weak = Rc::downgrade(self);
+        gtk::glib::timeout_add_local_once(
+            Duration::from_millis(OUTPUT_CONTEXT_REFRESH_DEBOUNCE_MS),
+            move || {
+                let Some(pane) = weak.upgrade() else {
+                    return;
+                };
+                pane.output_context_refresh_pending.set(false);
+                pane.refresh_context();
+            },
+        );
+    }
+
+    fn should_refresh_context_from_output(&self) -> bool {
+        if self.child_pid.get().is_none() {
+            return false;
+        }
+
+        let context = self.context.borrow();
+        util::supports_python_venv_commands(&context.shell)
+            && (context.python_project.is_some() || context.active_python_venv.is_some())
     }
 
     fn spawn_shell(self: &Rc<Self>, working_directory: Option<PathBuf>, show_banner: bool) {
@@ -612,7 +739,7 @@ impl TerminalPane {
                             if show_banner {
                                 // Avoid shell-triggered banner replay during spawn; bash/readline
                                 // may not be ready yet and can leak control-key artifacts.
-                                pane.render_banner(false, false, false);
+                                pane.render_banner(BannerRenderMode::Startup, false, false, false);
                             }
                             let mut commands = pane.pending_commands.borrow_mut();
                             for command in commands.drain(..) {
@@ -653,6 +780,27 @@ impl TerminalPane {
         } else {
             previous.git_branch.clone()
         };
+        let should_refresh_python_project = previous.cwd != next.cwd
+            || previous.active_python_venv != next.active_python_venv
+            || (self.is_active.get() && tick % 4 == 0)
+            || tick % 12 == 0;
+        next.python_project = if should_refresh_python_project {
+            next.cwd.as_deref().and_then(context::detect_python_project)
+        } else {
+            previous.python_project.clone()
+        };
+
+        let should_refresh_public_ip = next.network.has_any_signal()
+            && ((previous.network.public_ip.is_none() && tick > 1)
+                || tick % constants::PUBLIC_IP_REFRESH_TICKS == 0);
+        next.network.public_ip = if !next.network.has_any_signal() {
+            None
+        } else if should_refresh_public_ip {
+            util::cached_public_ip(constants::PUBLIC_IP_CACHE_MAX_AGE_SECONDS)
+                .or(previous.network.public_ip.clone())
+        } else {
+            previous.network.public_ip.clone()
+        };
 
         self.render_context(&next);
 
@@ -663,10 +811,16 @@ impl TerminalPane {
     }
 
     fn render_context(&self, context: &PanelContext) {
+        let network_line = context.network.detail_line();
         self.title_label.set_text(&context.header_title());
         self.subtitle_label.set_text(&context.header_subtitle());
-        self.chrome
-            .set_tooltip_text(Some(&context.header_subtitle()));
+        self.network_label.set_text(&network_line);
+        self.network_label.set_tooltip_text(Some(&network_line));
+        self.chrome.set_tooltip_text(Some(&format!(
+            "{}\n{}",
+            context.header_subtitle(),
+            network_line
+        )));
         self.title_label
             .set_tooltip_text(Some(&context.header_title()));
 
@@ -773,6 +927,8 @@ impl TerminalPane {
         self.chrome.set_visible(show_chrome);
         self.subtitle_label
             .set_visible(show_chrome && !compact && !self.subtitle_label.text().is_empty());
+        self.network_label
+            .set_visible(show_chrome && !dense && !self.network_label.text().is_empty());
         self.badge_box
             .set_visible(show_chrome && !dense && self.badge_box.first_child().is_some());
         self.ambient.set_visible(true);
@@ -784,7 +940,13 @@ impl TerminalPane {
         self.terminal.set_enable_shaping(!dense);
     }
 
-    fn render_banner(&self, focus_terminal: bool, flash: bool, allow_shell_integration: bool) {
+    fn render_banner(
+        &self,
+        mode: BannerRenderMode,
+        focus_terminal: bool,
+        flash: bool,
+        allow_shell_integration: bool,
+    ) {
         let columns = self.terminal.column_count().max(1) as usize;
         let rendered = banner::startup_payload_for_columns(
             &self.shell_path,
@@ -801,11 +963,14 @@ impl TerminalPane {
         if rendered_via_shell {
             self.terminal.feed_child(&[0x07]);
         } else {
-            let mut payload = String::from("\r\n");
+            let mut payload = String::new();
+            if matches!(mode, BannerRenderMode::Manual) {
+                payload.push_str("\r\n");
+            }
             payload.push_str(&rendered.replace('\n', "\r\n"));
             payload.push_str("\r\n");
             self.terminal.feed(payload.as_bytes());
-            if self.child_pid.get().is_some() {
+            if matches!(mode, BannerRenderMode::Manual) && self.child_pid.get().is_some() {
                 self.terminal.feed_child(b"\n");
             }
         }
@@ -913,4 +1078,40 @@ fn set_css_class(widget: &impl IsA<gtk::Widget>, class_name: &str, enabled: bool
     } else {
         widget.remove_css_class(class_name);
     }
+}
+
+fn normalize_link_target(uri: &str) -> Option<String> {
+    let mut normalized = uri
+        .trim()
+        .trim_end_matches(|ch: char| matches!(ch, '.' | ',' | ':' | ';' | '!' | '?'))
+        .trim_end_matches(['"', '\'']);
+
+    loop {
+        let Some(last) = normalized.chars().last() else {
+            break;
+        };
+
+        let unmatched_suffix = match last {
+            ')' => normalized.matches(')').count() > normalized.matches('(').count(),
+            ']' => normalized.matches(']').count() > normalized.matches('[').count(),
+            '}' => normalized.matches('}').count() > normalized.matches('{').count(),
+            _ => false,
+        };
+
+        if !unmatched_suffix {
+            break;
+        }
+
+        normalized = normalized[..normalized.len() - last.len_utf8()].trim_end();
+    }
+
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if normalized.starts_with("www.") {
+        return Some(format!("https://{normalized}"));
+    }
+
+    Some(normalized.to_string())
 }

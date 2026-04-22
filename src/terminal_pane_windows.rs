@@ -772,6 +772,9 @@ impl TerminalPane {
             container_hint: None,
             git_branch: None,
             lab_hint: None,
+            python_project: None,
+            active_python_venv: None,
+            network: crate::context::NetworkContext::default(),
             mode: if self.child_pid.get().is_some() {
                 PanelMode::Shell
             } else {
@@ -788,6 +791,17 @@ impl TerminalPane {
                 .and_then(crate::context::detect_git_branch)
         } else {
             previous.git_branch.clone()
+        };
+        let should_refresh_python_project = previous.cwd != next.cwd
+            || previous.active_python_venv != next.active_python_venv
+            || (self.is_active.get() && tick % 4 == 0)
+            || tick % 12 == 0;
+        next.python_project = if should_refresh_python_project {
+            next.cwd
+                .as_deref()
+                .and_then(crate::context::detect_python_project)
+        } else {
+            previous.python_project.clone()
         };
 
         self.render_context(&next);

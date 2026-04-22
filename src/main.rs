@@ -137,7 +137,9 @@ fn configure_windows_runtime_prefix() {
         candidates.insert(0, parent.to_path_buf());
     }
 
-    let Some(prefix) = candidates.into_iter().find(|candidate| has_runtime_layout(candidate))
+    let Some(prefix) = candidates
+        .into_iter()
+        .find(|candidate| has_runtime_layout(candidate))
     else {
         return;
     };

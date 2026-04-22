@@ -282,6 +282,48 @@ pub fn shell_quote(input: &str) -> String {
     format!("'{escaped}'")
 }
 
+pub fn supports_python_venv_commands(shell_path: &str) -> bool {
+    python_venv_deactivation_command(shell_path).is_some()
+}
+
+pub fn python_venv_activation_command(shell_path: &str, venv_root: &Path) -> Option<String> {
+    let shell = shell_name(shell_path).to_ascii_lowercase();
+    match shell.as_str() {
+        "bash" | "zsh" | "sh" => {
+            let script = venv_root.join("bin/activate");
+            script
+                .exists()
+                .then(|| format!(". {}", shell_quote(&script.display().to_string())))
+        }
+        "fish" => {
+            let script = venv_root.join("bin/activate.fish");
+            script
+                .exists()
+                .then(|| format!("source {}", shell_quote(&script.display().to_string())))
+        }
+        "pwsh" | "pwsh.exe" | "pwsh-preview" | "powershell" | "powershell.exe" => {
+            let script = venv_root.join("Scripts/Activate.ps1");
+            script.exists().then(|| format!("& '{}'", script.display()))
+        }
+        "cmd" | "cmd.exe" => {
+            let script = venv_root.join("Scripts/activate.bat");
+            script
+                .exists()
+                .then(|| format!("call \"{}\"", script.display()))
+        }
+        _ => None,
+    }
+}
+
+pub fn python_venv_deactivation_command(shell_path: &str) -> Option<String> {
+    let shell = shell_name(shell_path).to_ascii_lowercase();
+    match shell.as_str() {
+        "bash" | "zsh" | "sh" | "fish" | "pwsh" | "pwsh.exe" | "pwsh-preview" | "powershell"
+        | "powershell.exe" | "cmd" | "cmd.exe" => Some("deactivate".to_string()),
+        _ => None,
+    }
+}
+
 fn desktop_exec_value(path: &Path) -> String {
     path.display()
         .to_string()
@@ -780,3 +822,60 @@ shutdown() { __voidshell_maybe_sudo shutdown "$@"; }
 reboot() { __voidshell_maybe_sudo reboot "$@"; }
 poweroff() { __voidshell_maybe_sudo poweroff "$@"; }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "termvoid-util-{label}-{}-{counter}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn genera_comando_de_activacion_para_bash() {
+        let root = unique_temp_dir("bash-venv");
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(root.join("bin/activate"), "echo active\n").unwrap();
+
+        let command = python_venv_activation_command("bash", &root)
+            .expect("debe generar comando de activacion");
+        assert_eq!(
+            command,
+            format!(
+                ". {}",
+                shell_quote(&root.join("bin/activate").display().to_string())
+            )
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn genera_comando_de_desactivacion_para_shells_soportados() {
+        assert_eq!(
+            python_venv_deactivation_command("bash").as_deref(),
+            Some("deactivate")
+        );
+        assert_eq!(
+            python_venv_deactivation_command("zsh").as_deref(),
+            Some("deactivate")
+        );
+        assert_eq!(
+            python_venv_deactivation_command("fish").as_deref(),
+            Some("deactivate")
+        );
+    }
+}

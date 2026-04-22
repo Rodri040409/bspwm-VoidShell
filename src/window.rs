@@ -1,6 +1,6 @@
 use crate::config::{AppConfig, ConfigManager};
 use crate::constants;
-use crate::context::PanelContext;
+use crate::context::{self, PanelContext};
 use crate::history::{HistoryManager, HistoryStore};
 use crate::layout::{Direction, InsertPosition, SplitAxis, TileTree};
 use crate::preferences::{self, PreferenceCallbacks};
@@ -11,8 +11,9 @@ use crate::terminal_pane::{PaneCallbacks, PaneSpawnMotion, TerminalPane};
 use crate::theme;
 use crate::util;
 #[cfg(not(windows))]
-use adw::prelude::AdwDialogExt;
+use adw::prelude::*;
 use gtk::gio;
+#[cfg(windows)]
 use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,6 +21,14 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 pub struct MainWindow;
+
+#[derive(Debug, Clone, Default)]
+struct PaneVenvState {
+    last_project: Option<context::PythonProjectContext>,
+    last_active_venv: Option<PathBuf>,
+    acknowledged_project_root: Option<PathBuf>,
+    pending_project_root: Option<PathBuf>,
+}
 
 struct WindowState {
     app: gtk::Application,
@@ -49,6 +58,7 @@ struct WindowState {
     toast_revealer: gtk::Revealer,
     toast_label: gtk::Label,
     toast_serial: Cell<u64>,
+    venv_states: RefCell<BTreeMap<u64, PaneVenvState>>,
     startup_command: Option<String>,
     working_directory: Option<PathBuf>,
 }
@@ -249,6 +259,7 @@ impl WindowState {
             toast_revealer,
             toast_label,
             toast_serial: Cell::new(0),
+            venv_states: RefCell::new(BTreeMap::new()),
             startup_command,
             working_directory,
         });
@@ -506,7 +517,7 @@ impl WindowState {
         }
     }
 
-    fn on_context_changed(&self, _pane_id: u64, context: PanelContext) {
+    fn on_context_changed(self: &Rc<Self>, pane_id: u64, context: PanelContext) {
         let mut history = self.history.borrow_mut();
         if let Some(cwd) = &context.cwd {
             history.note_directory(cwd);
@@ -523,6 +534,153 @@ impl WindowState {
         drop(history);
         self.persist_history();
         self.refresh_header();
+        self.handle_python_venv_context(pane_id, &context);
+    }
+
+    #[cfg(not(windows))]
+    fn handle_python_venv_context(self: &Rc<Self>, pane_id: u64, context: &PanelContext) {
+        let shell_idle = shell_is_idle(context);
+        let active_venv = context.active_python_venv.clone();
+        let project = context.python_project.clone();
+
+        let (previous_project, previous_active_venv) = {
+            let mut states = self.venv_states.borrow_mut();
+            let state = states.entry(pane_id).or_default();
+            sync_python_venv_prompt_state(state, project.as_ref(), active_venv.as_deref());
+
+            let previous_project = state.last_project.clone();
+            let previous_active_venv = state.last_active_venv.clone();
+            state.last_project = project.clone();
+            state.last_active_venv = active_venv.clone();
+            (previous_project, previous_active_venv)
+        };
+
+        if !shell_idle || !util::supports_python_venv_commands(&context.shell) {
+            return;
+        }
+
+        if should_auto_deactivate_venv(
+            previous_project.as_ref(),
+            previous_active_venv.as_deref(),
+            active_venv.as_deref(),
+            context.cwd.as_deref(),
+        ) {
+            let Some(pane) = self.panes.borrow().get(&pane_id).cloned() else {
+                return;
+            };
+            if let Some(command) = util::python_venv_deactivation_command(&context.shell) {
+                if let Some(state) = self.venv_states.borrow_mut().get_mut(&pane_id) {
+                    state.last_active_venv = None;
+                }
+                pane.run_command(&command);
+                pane.focus_terminal();
+                self.show_toast("Entorno virtual desactivado al salir del proyecto");
+            }
+            return;
+        }
+
+        let Some(project) = project else {
+            return;
+        };
+
+        if active_venv.as_ref() == Some(&project.venv_path) || active_venv.is_some() {
+            return;
+        }
+
+        let should_prompt = {
+            let mut states = self.venv_states.borrow_mut();
+            let state = states.entry(pane_id).or_default();
+            should_prompt_python_venv_activation(state, &project)
+        };
+
+        if should_prompt {
+            self.prompt_python_venv_activation(pane_id, &project, &context.shell);
+        }
+    }
+
+    #[cfg(windows)]
+    fn handle_python_venv_context(self: &Rc<Self>, _pane_id: u64, _context: &PanelContext) {}
+
+    #[cfg(not(windows))]
+    fn prompt_python_venv_activation(
+        self: &Rc<Self>,
+        pane_id: u64,
+        project: &context::PythonProjectContext,
+        shell_name: &str,
+    ) {
+        let dialog = adw::AlertDialog::new(
+            Some("Entorno virtual detectado"),
+            Some(&format!(
+                "Proyecto Python en {}.\nSe encontro el entorno {}. Quieres cargarlo en este panel?",
+                util::display_path(&project.project_root),
+                project.venv_name
+            )),
+        );
+        dialog.add_responses(&[("accept", "Si"), ("reject", "No")]);
+        dialog.set_default_response(Some("accept"));
+        dialog.set_close_response("reject");
+        dialog.set_response_appearance("accept", adw::ResponseAppearance::Suggested);
+
+        let weak = Rc::downgrade(self);
+        let project = project.clone();
+        let shell_name = shell_name.to_string();
+        dialog.choose(
+            Some(&self.window),
+            None::<&gio::Cancellable>,
+            move |response| {
+                let Some(state) = weak.upgrade() else {
+                    return;
+                };
+                state.resolve_python_venv_prompt(pane_id, &project, &shell_name, response.as_str());
+            },
+        );
+    }
+
+    #[cfg(not(windows))]
+    fn resolve_python_venv_prompt(
+        self: &Rc<Self>,
+        pane_id: u64,
+        project: &context::PythonProjectContext,
+        shell_name: &str,
+        response: &str,
+    ) {
+        let Some(pane) = self.panes.borrow().get(&pane_id).cloned() else {
+            return;
+        };
+
+        let current_context = pane.context();
+        let still_in_project = current_context
+            .cwd
+            .as_deref()
+            .is_some_and(|cwd| cwd.starts_with(&project.project_root));
+        if !still_in_project {
+            return;
+        }
+
+        {
+            let mut states = self.venv_states.borrow_mut();
+            let state = states.entry(pane_id).or_default();
+            note_python_venv_prompt_resolution(state, project);
+        }
+
+        if current_context.active_python_venv.as_ref() == Some(&project.venv_path) {
+            return;
+        }
+
+        if response == "accept" {
+            if let Some(command) =
+                util::python_venv_activation_command(shell_name, &project.venv_path)
+            {
+                pane.run_command(&command);
+                pane.focus_terminal();
+                self.show_toast(&format!("Entorno {} cargado", project.venv_name));
+            } else {
+                self.show_toast(
+                    "No se encontro un script de activacion compatible para este shell",
+                );
+            }
+            return;
+        }
     }
 
     fn new_panel(self: &Rc<Self>) {
@@ -1410,6 +1568,7 @@ impl WindowState {
         }
         self.closing_panes.borrow_mut().remove(&pane_id);
         self.focus_history.borrow_mut().retain(|id| *id != pane_id);
+        self.venv_states.borrow_mut().remove(&pane_id);
         if self.zoomed_pane.get() == Some(pane_id) {
             self.zoomed_pane.set(None);
         }
@@ -1472,6 +1631,94 @@ impl WindowState {
             self.show_toast(&format!("No se pudo guardar el historial: {error}"));
         }
     }
+}
+
+fn shell_is_idle(context: &PanelContext) -> bool {
+    context.shell_alive
+        && !context.in_ssh
+        && context
+            .foreground_process
+            .as_deref()
+            .map(|process| process == context.shell.as_str())
+            .unwrap_or(true)
+}
+
+fn should_auto_deactivate_venv(
+    previous_project: Option<&context::PythonProjectContext>,
+    previous_active_venv: Option<&std::path::Path>,
+    current_active_venv: Option<&std::path::Path>,
+    current_cwd: Option<&std::path::Path>,
+) -> bool {
+    let Some(previous_project) = previous_project else {
+        return false;
+    };
+    let Some(previous_active_venv) = previous_active_venv else {
+        return false;
+    };
+    let Some(current_active_venv) = current_active_venv else {
+        return false;
+    };
+
+    previous_active_venv == previous_project.venv_path.as_path()
+        && current_active_venv == previous_active_venv
+        && current_cwd
+            .map(|cwd| !cwd.starts_with(&previous_project.project_root))
+            .unwrap_or(true)
+}
+
+fn sync_python_venv_prompt_state(
+    state: &mut PaneVenvState,
+    project: Option<&context::PythonProjectContext>,
+    active_venv: Option<&std::path::Path>,
+) {
+    let current_project_root = project.map(|project| project.project_root.as_path());
+    let previous_project_root = state
+        .last_project
+        .as_ref()
+        .map(|project| project.project_root.as_path());
+
+    if previous_project_root != current_project_root {
+        state.acknowledged_project_root = None;
+        if state.pending_project_root.as_deref() != current_project_root {
+            state.pending_project_root = None;
+        }
+    }
+
+    if let Some(project) = project {
+        if active_venv == Some(project.venv_path.as_path()) {
+            state.acknowledged_project_root = Some(project.project_root.clone());
+            state.pending_project_root = None;
+        } else if state.pending_project_root.as_ref() != Some(&project.project_root) {
+            state.pending_project_root = None;
+        }
+    } else {
+        state.acknowledged_project_root = None;
+        state.pending_project_root = None;
+    }
+}
+
+fn should_prompt_python_venv_activation(
+    state: &mut PaneVenvState,
+    project: &context::PythonProjectContext,
+) -> bool {
+    if state.pending_project_root.as_ref() == Some(&project.project_root)
+        || state.acknowledged_project_root.as_ref() == Some(&project.project_root)
+    {
+        false
+    } else {
+        state.pending_project_root = Some(project.project_root.clone());
+        true
+    }
+}
+
+fn note_python_venv_prompt_resolution(
+    state: &mut PaneVenvState,
+    project: &context::PythonProjectContext,
+) {
+    if state.pending_project_root.as_ref() == Some(&project.project_root) {
+        state.pending_project_root = None;
+    }
+    state.acknowledged_project_root = Some(project.project_root.clone());
 }
 
 fn pane_spawn_motion(axis: SplitAxis, position: InsertPosition) -> PaneSpawnMotion {
@@ -1617,4 +1864,101 @@ fn build_palette_empty_row(empty_query: bool) -> gtk::ListBoxRow {
     container.append(&subtitle);
     row.set_child(Some(&container));
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detecta_cuando_debe_desactivar_el_venv_al_salir_del_proyecto() {
+        let project = context::PythonProjectContext {
+            project_root: PathBuf::from("/tmp/project"),
+            venv_path: PathBuf::from("/tmp/project/.venv"),
+            venv_name: ".venv".to_string(),
+        };
+
+        assert!(should_auto_deactivate_venv(
+            Some(&project),
+            Some(project.venv_path.as_path()),
+            Some(project.venv_path.as_path()),
+            Some(std::path::Path::new("/tmp/other")),
+        ));
+    }
+
+    #[test]
+    fn no_desactiva_el_venv_si_sigue_dentro_del_proyecto() {
+        let project = context::PythonProjectContext {
+            project_root: PathBuf::from("/tmp/project"),
+            venv_path: PathBuf::from("/tmp/project/.venv"),
+            venv_name: ".venv".to_string(),
+        };
+
+        assert!(!should_auto_deactivate_venv(
+            Some(&project),
+            Some(project.venv_path.as_path()),
+            Some(project.venv_path.as_path()),
+            Some(std::path::Path::new("/tmp/project/src")),
+        ));
+    }
+
+    #[test]
+    fn no_repite_prompt_si_ya_se_resolvio_en_el_mismo_proyecto() {
+        let project = context::PythonProjectContext {
+            project_root: PathBuf::from("/tmp/project"),
+            venv_path: PathBuf::from("/tmp/project/.venv"),
+            venv_name: ".venv".to_string(),
+        };
+        let mut state = PaneVenvState::default();
+
+        assert!(should_prompt_python_venv_activation(&mut state, &project));
+        note_python_venv_prompt_resolution(&mut state, &project);
+
+        assert!(!should_prompt_python_venv_activation(&mut state, &project));
+    }
+
+    #[test]
+    fn no_repite_prompt_si_el_venv_del_proyecto_ya_estaba_activo() {
+        let project = context::PythonProjectContext {
+            project_root: PathBuf::from("/tmp/project"),
+            venv_path: PathBuf::from("/tmp/project/.venv"),
+            venv_name: ".venv".to_string(),
+        };
+        let mut state = PaneVenvState::default();
+
+        sync_python_venv_prompt_state(
+            &mut state,
+            Some(&project),
+            Some(project.venv_path.as_path()),
+        );
+        state.last_project = Some(project.clone());
+        state.last_active_venv = Some(project.venv_path.clone());
+
+        sync_python_venv_prompt_state(&mut state, Some(&project), None);
+
+        assert!(!should_prompt_python_venv_activation(&mut state, &project));
+    }
+
+    #[test]
+    fn vuelve_a_preguntar_cuando_cambia_de_proyecto() {
+        let project_a = context::PythonProjectContext {
+            project_root: PathBuf::from("/tmp/project-a"),
+            venv_path: PathBuf::from("/tmp/project-a/.venv"),
+            venv_name: ".venv".to_string(),
+        };
+        let project_b = context::PythonProjectContext {
+            project_root: PathBuf::from("/tmp/project-b"),
+            venv_path: PathBuf::from("/tmp/project-b/.venv"),
+            venv_name: ".venv".to_string(),
+        };
+        let mut state = PaneVenvState::default();
+
+        assert!(should_prompt_python_venv_activation(&mut state, &project_a));
+        note_python_venv_prompt_resolution(&mut state, &project_a);
+        state.last_project = Some(project_a);
+
+        sync_python_venv_prompt_state(&mut state, Some(&project_b), None);
+
+        assert!(should_prompt_python_venv_activation(&mut state, &project_b));
+    }
 }

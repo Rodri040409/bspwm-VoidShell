@@ -47,7 +47,10 @@ pub fn build_dialog(
     scroller.set_child(Some(&root));
 
     let visuals = build_section("Identidad visual", "Fondo, chrome y tipografía.");
-    let runtime = build_section("Ejecución", "Inicio, animaciones y ayudas de productividad.");
+    let runtime = build_section(
+        "Ejecución",
+        "Inicio, animaciones y ayudas de productividad.",
+    );
     let utility = build_section("Utilidades", "Recarga de configuración desde disco.");
     root.append(&visuals.0);
     root.append(&runtime.0);

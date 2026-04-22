@@ -479,6 +479,13 @@ window {{
   font-size: 9pt;
 }}
 
+.pane-network {{
+  color: rgba(196, 241, 255, 0.78);
+  font-size: 8.2pt;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  letter-spacing: 0.02em;
+}}
+
 .context-badge {{
   padding: 3px 7px;
   border-radius: 999px;
