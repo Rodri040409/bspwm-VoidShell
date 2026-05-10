@@ -3,13 +3,13 @@ use crate::util;
 use gtk::gio;
 #[cfg(not(windows))]
 use gtk::gio::prelude::SettingsExt;
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::ffi::CStr;
 use std::fs;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(unix)]
 use std::os::fd::RawFd;
@@ -29,9 +29,7 @@ const PYTHON_MARKER_FILES: [&str; 6] = [
 ];
 const COMMON_PYTHON_SOURCE_DIRS: [&str; 5] = ["src", "app", "scripts", "tests", "tools"];
 
-thread_local! {
-    static VPN_CONTEXT_CACHE: RefCell<Option<CachedVpnContext>> = const { RefCell::new(None) };
-}
+static VPN_CONTEXT_CACHE: OnceLock<Mutex<Option<CachedVpnContext>>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PanelMode {
@@ -288,6 +286,9 @@ impl PanelContext {
 
     pub fn header_subtitle(&self) -> String {
         let mut parts = vec![self.hostname.clone(), self.shell.clone()];
+        if let Some(venv) = &self.active_python_venv {
+            parts.push(format!("VENV {}", python_venv_name(venv)));
+        }
         if let Some(process) = &self.foreground_process {
             if process != &self.shell {
                 parts.push(process.clone());
@@ -853,7 +854,7 @@ fn detect_proxy_details(env: &BTreeMap<String, String>) -> Option<ProxyDetails> 
             continue;
         };
 
-        let ip = resolve_host_ip(&endpoint.host, endpoint.port);
+        let ip = literal_host_ip(&endpoint.host);
         let display = endpoint
             .port
             .map(|port| format!("{}:{port}", endpoint.host))
@@ -889,7 +890,7 @@ fn detect_system_proxy_details() -> Option<ProxyDetails> {
             host: host.to_string(),
             port: (port > 0).then_some(port as u16),
         };
-        let ip = resolve_host_ip(&endpoint.host, endpoint.port);
+        let ip = literal_host_ip(&endpoint.host);
         let display = endpoint
             .port
             .map(|port| format!("{}:{port}", endpoint.host))
@@ -932,21 +933,22 @@ fn detect_vpn_context(
 }
 
 fn cached_vpn_context() -> Option<Option<VpnContext>> {
-    VPN_CONTEXT_CACHE.with(|slot| {
-        let cache = slot.borrow();
-        let cached = cache.as_ref()?;
-        let age = util::now_epoch_seconds().saturating_sub(cached.updated_at);
-        (age <= VPN_CACHE_MAX_AGE_SECONDS).then(|| cached.value.clone())
-    })
+    let cache = VPN_CONTEXT_CACHE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()?;
+    let cached = cache.as_ref()?;
+    let age = util::now_epoch_seconds().saturating_sub(cached.updated_at);
+    (age <= VPN_CACHE_MAX_AGE_SECONDS).then(|| cached.value.clone())
 }
 
 fn store_cached_vpn_context(value: Option<VpnContext>) {
-    VPN_CONTEXT_CACHE.with(|slot| {
-        *slot.borrow_mut() = Some(CachedVpnContext {
+    if let Ok(mut cache) = VPN_CONTEXT_CACHE.get_or_init(|| Mutex::new(None)).lock() {
+        *cache = Some(CachedVpnContext {
             updated_at: util::now_epoch_seconds(),
             value,
         });
-    });
+    }
 }
 
 fn detect_expressvpn_context(
@@ -1221,26 +1223,8 @@ fn parse_proxy_endpoint(raw: &str) -> Option<ProxyEndpoint> {
     (!host.is_empty()).then_some(ProxyEndpoint { host, port })
 }
 
-fn resolve_host_ip(host: &str, port: Option<u16>) -> Option<String> {
-    if host.parse::<IpAddr>().is_ok() {
-        return Some(host.to_string());
-    }
-
-    let port = port.unwrap_or(80);
-    (host, port)
-        .to_socket_addrs()
-        .ok()?
-        .find_map(|address| match address.ip() {
-            IpAddr::V4(ip) => Some(ip.to_string()),
-            IpAddr::V6(_) => None,
-        })
-        .or_else(|| {
-            (host, port)
-                .to_socket_addrs()
-                .ok()?
-                .next()
-                .map(|address| address.ip().to_string())
-        })
+fn literal_host_ip(host: &str) -> Option<String> {
+    host.parse::<IpAddr>().ok().map(|ip| ip.to_string())
 }
 
 fn primary_local_interface_ip(

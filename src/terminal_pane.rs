@@ -12,12 +12,14 @@ use std::cell::{Cell, RefCell};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::mpsc::{self, TryRecvError};
+use std::thread;
 use std::time::Duration;
 use vte::prelude::*;
 
 const LINK_REGEX_PATTERN: &str =
     r#"(?i)\b(?:[a-z][a-z0-9+.-]*://|mailto:|www\.)[^\s<>'"`()\[\]{}]+"#;
-const OUTPUT_CONTEXT_REFRESH_DEBOUNCE_MS: u64 = 220;
+const CONTEXT_RESULT_POLL_MS: u64 = 120;
 
 #[derive(Clone)]
 pub struct PaneCallbacks {
@@ -64,8 +66,9 @@ pub struct TerminalPane {
     pending_commands: RefCell<Vec<String>>,
     context: RefCell<PanelContext>,
     context_tick: Cell<u64>,
+    context_refresh_in_flight: Cell<bool>,
+    context_refresh_queued: Cell<bool>,
     output_pulse_pending: Cell<bool>,
-    output_context_refresh_pending: Cell<bool>,
     is_active: Cell<bool>,
     compact_mode: Cell<bool>,
     dense_mode: Cell<bool>,
@@ -74,6 +77,7 @@ pub struct TerminalPane {
     show_context_bar: Cell<bool>,
     banner_layout: Cell<BannerInfoLayout>,
     palette_preset: Cell<Option<theme::PanePalettePreset>>,
+    python_venv_state_file: PathBuf,
 }
 
 impl TerminalPane {
@@ -209,8 +213,9 @@ impl TerminalPane {
             pending_commands: RefCell::new(Vec::new()),
             context: RefCell::new(PanelContext::default()),
             context_tick: Cell::new(0),
+            context_refresh_in_flight: Cell::new(false),
+            context_refresh_queued: Cell::new(false),
             output_pulse_pending: Cell::new(false),
-            output_context_refresh_pending: Cell::new(false),
             is_active: Cell::new(false),
             compact_mode: Cell::new(false),
             dense_mode: Cell::new(false),
@@ -219,6 +224,7 @@ impl TerminalPane {
             show_context_bar: Cell::new(true),
             banner_layout: Cell::new(BannerInfoLayout::Right),
             palette_preset: Cell::new(None),
+            python_venv_state_file: util::python_venv_state_file(id),
         });
 
         pane.apply_config(config);
@@ -249,6 +255,18 @@ impl TerminalPane {
 
     pub fn current_directory(&self) -> Option<PathBuf> {
         self.context.borrow().cwd.clone()
+    }
+
+    pub fn set_active_python_venv_hint(&self, venv_path: Option<PathBuf>) {
+        let mut next = self.context.borrow().clone();
+        if next.active_python_venv == venv_path {
+            return;
+        }
+
+        next.active_python_venv = venv_path;
+        self.render_context(&next);
+        *self.context.borrow_mut() = next.clone();
+        (self.callbacks.on_context_changed)(self.id, next);
     }
 
     pub fn detach_from_parent(&self) {
@@ -619,7 +637,6 @@ impl TerminalPane {
         self.terminal.connect_contents_changed(move |_| {
             if let Some(pane) = weak.upgrade() {
                 pane.pulse_output();
-                pane.schedule_output_context_refresh();
             }
         });
 
@@ -678,40 +695,9 @@ impl TerminalPane {
         });
     }
 
-    fn schedule_output_context_refresh(self: &Rc<Self>) {
-        if !self.should_refresh_context_from_output() {
-            return;
-        }
-
-        if self.output_context_refresh_pending.replace(true) {
-            return;
-        }
-
-        let weak = Rc::downgrade(self);
-        gtk::glib::timeout_add_local_once(
-            Duration::from_millis(OUTPUT_CONTEXT_REFRESH_DEBOUNCE_MS),
-            move || {
-                let Some(pane) = weak.upgrade() else {
-                    return;
-                };
-                pane.output_context_refresh_pending.set(false);
-                pane.refresh_context();
-            },
-        );
-    }
-
-    fn should_refresh_context_from_output(&self) -> bool {
-        if self.child_pid.get().is_none() {
-            return false;
-        }
-
-        let context = self.context.borrow();
-        util::supports_python_venv_commands(&context.shell)
-            && (context.python_project.is_some() || context.active_python_venv.is_some())
-    }
-
     fn spawn_shell(self: &Rc<Self>, working_directory: Option<PathBuf>, show_banner: bool) {
-        let env_strings = util::envv(&self.shell_path);
+        let _ = util::write_python_venv_state(&self.python_venv_state_file, None);
+        let env_strings = util::envv(&self.shell_path, Some(&self.python_venv_state_file));
         let env_refs: Vec<&str> = env_strings.iter().map(String::as_str).collect();
         let shell_args = util::default_shell_args(&self.shell_path);
         let mut argv_strings = vec![self.shell_path.clone()];
@@ -759,54 +745,102 @@ impl TerminalPane {
         );
     }
 
-    fn refresh_context(&self) {
+    fn refresh_context(self: &Rc<Self>) {
+        if self.context_refresh_in_flight.replace(true) {
+            self.context_refresh_queued.set(true);
+            return;
+        }
+
         #[cfg(unix)]
         let pty_fd = self.terminal.pty().map(|pty| pty.fd().as_raw_fd());
         #[cfg(not(unix))]
         let pty_fd = Option::<i32>::None;
-        let mut next = context::detect_panel_context(
-            self.child_pid.get().map(|pid| pid.0),
-            pty_fd,
-            &self.shell_path,
-        );
-
+        let shell_pid = self.child_pid.get().map(|pid| pid.0);
+        let shell_path = self.shell_path.clone();
         let tick = self.context_tick.get() + 1;
         self.context_tick.set(tick);
         let previous = self.context.borrow().clone();
-        let should_refresh_git =
-            previous.cwd != next.cwd || (self.is_active.get() && tick % 4 == 0) || tick % 12 == 0;
-        next.git_branch = if should_refresh_git {
-            next.cwd.as_deref().and_then(context::detect_git_branch)
-        } else {
-            previous.git_branch.clone()
-        };
-        let should_refresh_python_project = previous.cwd != next.cwd
-            || previous.active_python_venv != next.active_python_venv
-            || (self.is_active.get() && tick % 4 == 0)
-            || tick % 12 == 0;
-        next.python_project = if should_refresh_python_project {
-            next.cwd.as_deref().and_then(context::detect_python_project)
-        } else {
-            previous.python_project.clone()
-        };
+        let is_active = self.is_active.get();
+        let python_venv_state_file = self.python_venv_state_file.clone();
+        let (sender, receiver) = mpsc::channel();
 
-        let should_refresh_public_ip = next.network.has_any_signal()
-            && ((previous.network.public_ip.is_none() && tick > 1)
-                || tick % constants::PUBLIC_IP_REFRESH_TICKS == 0);
-        next.network.public_ip = if !next.network.has_any_signal() {
-            None
-        } else if should_refresh_public_ip {
-            util::cached_public_ip(constants::PUBLIC_IP_CACHE_MAX_AGE_SECONDS)
-                .or(previous.network.public_ip.clone())
-        } else {
-            previous.network.public_ip.clone()
-        };
+        thread::spawn(move || {
+            let mut next = context::detect_panel_context(shell_pid, pty_fd, &shell_path);
+            if next.active_python_venv.is_none() {
+                next.active_python_venv = util::read_python_venv_state(&python_venv_state_file);
+            }
 
-        self.render_context(&next);
+            let should_refresh_git =
+                previous.cwd != next.cwd || (is_active && tick % 4 == 0) || tick % 12 == 0;
+            next.git_branch = if should_refresh_git {
+                next.cwd.as_deref().and_then(context::detect_git_branch)
+            } else {
+                previous.git_branch.clone()
+            };
+            let should_refresh_python_project = previous.cwd != next.cwd
+                || previous.active_python_venv != next.active_python_venv
+                || (is_active && tick % 4 == 0)
+                || tick % 12 == 0;
+            next.python_project = if should_refresh_python_project {
+                next.cwd.as_deref().and_then(context::detect_python_project)
+            } else {
+                previous.python_project.clone()
+            };
 
+            let should_refresh_public_ip = next.network.has_any_signal()
+                && ((previous.network.public_ip.is_none() && tick > 1)
+                    || tick % constants::PUBLIC_IP_REFRESH_TICKS == 0);
+            next.network.public_ip = if !next.network.has_any_signal() {
+                None
+            } else if should_refresh_public_ip {
+                util::cached_public_ip(constants::PUBLIC_IP_CACHE_MAX_AGE_SECONDS)
+                    .or(previous.network.public_ip.clone())
+            } else {
+                previous.network.public_ip.clone()
+            };
+
+            let _ = sender.send(next);
+        });
+
+        self.poll_context_refresh(receiver);
+    }
+
+    fn poll_context_refresh(self: &Rc<Self>, receiver: mpsc::Receiver<PanelContext>) {
+        let weak = Rc::downgrade(self);
+        gtk::glib::timeout_add_local(Duration::from_millis(CONTEXT_RESULT_POLL_MS), move || {
+            match receiver.try_recv() {
+                Ok(next) => {
+                    if let Some(pane) = weak.upgrade() {
+                        pane.finish_context_refresh(next);
+                    }
+                    gtk::glib::ControlFlow::Break
+                }
+                Err(TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+                Err(TryRecvError::Disconnected) => {
+                    if let Some(pane) = weak.upgrade() {
+                        pane.context_refresh_in_flight.set(false);
+                        if pane.context_refresh_queued.replace(false) {
+                            pane.refresh_context();
+                        }
+                    }
+                    gtk::glib::ControlFlow::Break
+                }
+            }
+        });
+    }
+
+    fn finish_context_refresh(self: &Rc<Self>, next: PanelContext) {
+        self.context_refresh_in_flight.set(false);
+
+        let previous = self.context.borrow().clone();
         if previous != next {
+            self.render_context(&next);
             *self.context.borrow_mut() = next.clone();
             (self.callbacks.on_context_changed)(self.id, next);
+        }
+
+        if self.context_refresh_queued.replace(false) {
+            self.refresh_context();
         }
     }
 

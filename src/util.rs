@@ -8,8 +8,14 @@ use std::env;
 #[cfg(unix)]
 use std::ffi::CStr;
 use std::fs;
+use std::io::Read;
 use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const COMMAND_OUTPUT_TIMEOUT: Duration = Duration::from_millis(900);
 
 thread_local! {
     static WALLPAPER_CACHE: RefCell<BTreeMap<String, gdk::Texture>> = const { RefCell::new(BTreeMap::new()) };
@@ -170,6 +176,10 @@ pub fn live_banner_state_file() -> PathBuf {
     project_state_file("live-banner.ansi")
 }
 
+pub fn python_venv_state_file(pane_id: u64) -> PathBuf {
+    project_state_file(&format!("python-venv-{pane_id}.txt"))
+}
+
 pub fn write_live_banner(payload: &str) -> Option<PathBuf> {
     let path = live_banner_state_file();
     if let Some(parent) = path.parent() {
@@ -177,6 +187,29 @@ pub fn write_live_banner(payload: &str) -> Option<PathBuf> {
     }
     fs::write(&path, payload).ok()?;
     Some(path)
+}
+
+pub fn write_python_venv_state(path: &Path, venv_path: Option<&Path>) -> Option<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+
+    let payload = venv_path
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    fs::write(path, format!("{payload}\n")).ok()?;
+    Some(())
+}
+
+pub fn read_python_venv_state(path: &Path) -> Option<PathBuf> {
+    let content = fs::read_to_string(path).ok()?;
+    let raw = content.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let candidate = PathBuf::from(raw);
+    Some(fs::canonicalize(&candidate).unwrap_or(candidate))
 }
 
 #[cfg(not(windows))]
@@ -427,16 +460,37 @@ pub fn expand_user_path(input: &str) -> PathBuf {
 }
 
 pub fn command_output(program: &str, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new(program)
+    let mut child = Command::new(program)
         .args(args)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
-    if !output.status.success() {
-        return None;
-    }
 
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!stdout.is_empty()).then_some(stdout)
+    let started_at = Instant::now();
+    loop {
+        match child.try_wait().ok()? {
+            Some(status) => {
+                if !status.success() {
+                    return None;
+                }
+
+                let mut stdout = Vec::new();
+                if let Some(mut pipe) = child.stdout.take() {
+                    pipe.read_to_end(&mut stdout).ok()?;
+                }
+
+                let stdout = String::from_utf8_lossy(&stdout).trim().to_string();
+                return (!stdout.is_empty()).then_some(stdout);
+            }
+            None if started_at.elapsed() >= COMMAND_OUTPUT_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => thread::sleep(Duration::from_millis(12)),
+        }
+    }
 }
 
 pub fn project_state_file(name: &str) -> PathBuf {
@@ -639,7 +693,7 @@ pub fn now_epoch_seconds() -> u64 {
         .unwrap_or_default()
 }
 
-pub fn envv(shell_path: &str) -> Vec<String> {
+pub fn envv(shell_path: &str, python_venv_state_file: Option<&Path>) -> Vec<String> {
     let mut vars = BTreeMap::new();
 
     for (key, value) in std::env::vars_os() {
@@ -660,6 +714,12 @@ pub fn envv(shell_path: &str) -> Vec<String> {
         "VOIDSHELL_BANNER_FILE".to_string(),
         live_banner_state_file().display().to_string(),
     );
+    if let Some(path) = python_venv_state_file {
+        vars.insert(
+            "VOIDSHELL_VENV_FILE".to_string(),
+            path.display().to_string(),
+        );
+    }
     if let Some(inputrc) = readline_inputrc(shell_path) {
         vars.insert("INPUTRC".to_string(), inputrc);
     }
@@ -770,6 +830,47 @@ bind '"\e[B": history-search-forward'
 shopt -s direxpand 2>/dev/null
 
 complete -A directory cd pushd popd 2>/dev/null || complete -o dirnames cd pushd popd
+
+__voidshell_publish_python_venv() {
+  local state_file="${VOIDSHELL_VENV_FILE:-}"
+  [ -n "$state_file" ] || return 0
+  local next_value="${VIRTUAL_ENV:-}"
+  local current_value=""
+  if [ -r "$state_file" ]; then
+    IFS= read -r current_value < "$state_file" || current_value=""
+  fi
+  [ "$current_value" = "$next_value" ] && return 0
+  printf '%s\n' "$next_value" >| "$state_file" 2>/dev/null || true
+}
+
+__voidshell_prompt_hook() {
+  __voidshell_publish_python_venv
+}
+
+__voidshell_install_prompt_hook() {
+  local prompt_decl
+  prompt_decl="$(declare -p PROMPT_COMMAND 2>/dev/null || true)"
+
+  if [[ "$prompt_decl" == "declare -a"* ]]; then
+    local entry
+    for entry in "${PROMPT_COMMAND[@]}"; do
+      if [ "$entry" = "__voidshell_prompt_hook" ]; then
+        return 0
+      fi
+    done
+    PROMPT_COMMAND=(__voidshell_prompt_hook "${PROMPT_COMMAND[@]}")
+    return 0
+  fi
+
+  case ";${PROMPT_COMMAND:-};" in
+    *";__voidshell_prompt_hook;"*) ;;
+    ";;") PROMPT_COMMAND="__voidshell_prompt_hook" ;;
+    *) PROMPT_COMMAND="__voidshell_prompt_hook;${PROMPT_COMMAND}" ;;
+  esac
+}
+
+__voidshell_install_prompt_hook
+__voidshell_publish_python_venv
 
 __voidshell_confirm_sudo() {
   local cmd="$1"
@@ -899,5 +1000,28 @@ mod tests {
             python_venv_deactivation_command("fish").as_deref(),
             Some("deactivate")
         );
+    }
+
+    #[test]
+    fn genera_rcfile_de_bash_con_hook_de_venv() {
+        assert!(VOIDSHELL_BASH_INTEGRATION.contains("__voidshell_publish_python_venv"));
+        assert!(VOIDSHELL_BASH_INTEGRATION.contains("__voidshell_install_prompt_hook"));
+        assert!(VOIDSHELL_BASH_INTEGRATION.contains("VOIDSHELL_VENV_FILE"));
+    }
+
+    #[test]
+    fn persiste_y_recupera_estado_de_python_venv() {
+        let root = unique_temp_dir("venv-state");
+        let state_file = root.join("venv.txt");
+        let venv_path = root.join(".venv");
+        fs::create_dir_all(&venv_path).unwrap();
+
+        write_python_venv_state(&state_file, Some(&venv_path)).expect("debe persistir");
+        assert_eq!(read_python_venv_state(&state_file), Some(venv_path.clone()));
+
+        write_python_venv_state(&state_file, None).expect("debe limpiar");
+        assert_eq!(read_python_venv_state(&state_file), None);
+
+        let _ = fs::remove_dir_all(root);
     }
 }

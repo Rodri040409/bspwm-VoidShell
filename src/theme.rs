@@ -588,7 +588,7 @@ window {{
 }}
 
 .palette-row-prefix-icon {{
-  margin: auto;
+  margin: 0;
 }}
 
 .palette-target-badge {{

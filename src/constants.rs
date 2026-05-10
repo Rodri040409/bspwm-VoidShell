@@ -7,6 +7,6 @@ pub const CONFIG_ORGANIZATION: &str = "voidscripter";
 pub const CONFIG_APPLICATION: &str = "TermVoid";
 pub const ALT_SPACE_FALLBACK: &str = "<Primary><Shift>p";
 pub const DEFAULT_RESIZE_STEP: f32 = 0.05;
-pub const CONTEXT_REFRESH_MS: u64 = 1200;
+pub const CONTEXT_REFRESH_MS: u64 = 5000;
 pub const PUBLIC_IP_CACHE_MAX_AGE_SECONDS: u64 = 12;
 pub const PUBLIC_IP_REFRESH_TICKS: u64 = 4;

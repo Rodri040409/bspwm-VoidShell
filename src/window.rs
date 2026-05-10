@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, ConfigManager};
+use crate::config::{AppConfig, ConfigManager, CustomQuickAction};
 use crate::constants;
 use crate::context::{self, PanelContext};
 use crate::history::{HistoryManager, HistoryStore};
@@ -181,10 +181,18 @@ impl WindowState {
 
         let palette_card = gtk::Box::new(gtk::Orientation::Vertical, 10);
         palette_card.add_css_class("palette-card");
+        let palette_toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         let palette_search = gtk::SearchEntry::new();
         palette_search.set_placeholder_text(Some(
             "Acciones rápidas, ssh, contenedores, proyectos, git...",
         ));
+        palette_search.set_hexpand(true);
+        let palette_manage_button = gtk::Button::from_icon_name("document-edit-symbolic");
+        palette_manage_button.add_css_class("flat");
+        palette_manage_button.add_css_class("header-utility-button");
+        palette_manage_button.set_tooltip_text(Some("Gestionar comandos personalizados"));
+        palette_toolbar.append(&palette_search);
+        palette_toolbar.append(&palette_manage_button);
         let palette_scroller = gtk::ScrolledWindow::new();
         palette_scroller.set_min_content_height(340);
         palette_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -192,7 +200,7 @@ impl WindowState {
         palette_list.add_css_class("palette-list");
         palette_list.set_selection_mode(gtk::SelectionMode::None);
         palette_scroller.set_child(Some(&palette_list));
-        palette_card.append(&palette_search);
+        palette_card.append(&palette_toolbar);
         palette_card.append(&palette_scroller);
         palette_revealer.set_child(Some(&palette_card));
 
@@ -265,7 +273,12 @@ impl WindowState {
         });
 
         state.install_actions();
-        state.install_ui_handlers(palette_button, prefs_button, about_button);
+        state.install_ui_handlers(
+            palette_button,
+            palette_manage_button,
+            prefs_button,
+            about_button,
+        );
         state.apply_shared_wallpaper(&state.config.borrow());
         state.create_initial_pane();
         state.refresh_header();
@@ -275,6 +288,7 @@ impl WindowState {
     fn install_ui_handlers(
         self: &Rc<Self>,
         palette_button: gtk::Button,
+        palette_manage_button: gtk::Button,
         prefs_button: gtk::Button,
         about_button: gtk::Button,
     ) {
@@ -282,6 +296,13 @@ impl WindowState {
         palette_button.connect_clicked(move |_| {
             if let Some(state) = weak.upgrade() {
                 state.toggle_palette();
+            }
+        });
+
+        let weak = Rc::downgrade(self);
+        palette_manage_button.connect_clicked(move |_| {
+            if let Some(state) = weak.upgrade() {
+                state.open_quick_action_manager();
             }
         });
 
@@ -572,6 +593,7 @@ impl WindowState {
                 if let Some(state) = self.venv_states.borrow_mut().get_mut(&pane_id) {
                     state.last_active_venv = None;
                 }
+                pane.set_active_python_venv_hint(None);
                 pane.run_command(&command);
                 pane.focus_terminal();
                 self.show_toast("Entorno virtual desactivado al salir del proyecto");
@@ -672,6 +694,7 @@ impl WindowState {
                 util::python_venv_activation_command(shell_name, &project.venv_path)
             {
                 pane.run_command(&command);
+                pane.set_active_python_venv_hint(Some(project.venv_path.clone()));
                 pane.focus_terminal();
                 self.show_toast(&format!("Entorno {} cargado", project.venv_name));
             } else {
@@ -1060,6 +1083,341 @@ impl WindowState {
         dialog.present();
     }
 
+    #[allow(deprecated)]
+    fn open_quick_action_manager(self: &Rc<Self>) {
+        let dialog = gtk::Dialog::builder()
+            .title("Comandos personalizados")
+            .modal(true)
+            .transient_for(&self.window)
+            .default_width(720)
+            .default_height(520)
+            .build();
+        dialog.add_button("Cerrar", gtk::ResponseType::Close);
+
+        let content = dialog.content_area();
+        content.set_spacing(12);
+        content.set_margin_start(16);
+        content.set_margin_end(16);
+        content.set_margin_top(16);
+        content.set_margin_bottom(16);
+
+        let intro = gtk::Label::new(Some(
+            "Añade, renombra, reordena o elimina comandos para que aparezcan en Alt+F.",
+        ));
+        intro.set_xalign(0.0);
+        intro.set_wrap(true);
+        content.append(&intro);
+
+        let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let add_button = gtk::Button::with_label("Añadir comando");
+        add_button.add_css_class("suggested-action");
+        toolbar.append(&add_button);
+        content.append(&toolbar);
+
+        let scroller = gtk::ScrolledWindow::new();
+        scroller.set_vexpand(true);
+        scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        let list = gtk::ListBox::new();
+        list.set_selection_mode(gtk::SelectionMode::None);
+        scroller.set_child(Some(&list));
+        content.append(&scroller);
+
+        self.rebuild_custom_action_manager_rows(&list);
+
+        let weak = Rc::downgrade(self);
+        let list_for_add = list.clone();
+        add_button.connect_clicked(move |_| {
+            if let Some(state) = weak.upgrade() {
+                let list = list_for_add.clone();
+                state.open_custom_action_editor(
+                    None,
+                    Rc::new(move |state| {
+                        state.rebuild_custom_action_manager_rows(&list);
+                    }),
+                );
+            }
+        });
+
+        dialog.connect_response(|dialog, _| {
+            dialog.close();
+        });
+        dialog.present();
+    }
+
+    fn rebuild_custom_action_manager_rows(self: &Rc<Self>, list: &gtk::ListBox) {
+        while let Some(child) = list.first_child() {
+            list.remove(&child);
+        }
+
+        let actions = self.config.borrow().custom_quick_actions.clone();
+        if actions.is_empty() {
+            let row = gtk::ListBoxRow::new();
+            row.set_activatable(false);
+            row.set_selectable(false);
+
+            let message = gtk::Label::new(Some(
+                "Todavía no hay comandos personalizados. Crea uno y aparecerá en Alt+F.",
+            ));
+            message.set_wrap(true);
+            message.set_xalign(0.0);
+            message.set_margin_start(12);
+            message.set_margin_end(12);
+            message.set_margin_top(12);
+            message.set_margin_bottom(12);
+            row.set_child(Some(&message));
+            list.append(&row);
+            return;
+        }
+
+        for (index, action) in actions.into_iter().enumerate() {
+            let row = gtk::ListBoxRow::new();
+            row.set_activatable(false);
+
+            let container = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+            container.set_margin_start(12);
+            container.set_margin_end(12);
+            container.set_margin_top(10);
+            container.set_margin_bottom(10);
+
+            let text_box = gtk::Box::new(gtk::Orientation::Vertical, 3);
+            text_box.set_hexpand(true);
+
+            let title = gtk::Label::new(Some(&action.title));
+            title.add_css_class("title-4");
+            title.set_xalign(0.0);
+            title.set_wrap(true);
+
+            let subtitle_text = if action.subtitle.trim().is_empty() {
+                action.command.clone()
+            } else {
+                format!("{}  •  {}", action.subtitle, action.command)
+            };
+            let subtitle = gtk::Label::new(Some(&subtitle_text));
+            subtitle.add_css_class("dim-label");
+            subtitle.set_xalign(0.0);
+            subtitle.set_wrap(true);
+
+            let target = gtk::Label::new(Some(if action.open_in_new_pane {
+                "Panel nuevo"
+            } else {
+                "Panel actual"
+            }));
+            target.add_css_class("caption");
+            target.set_xalign(0.0);
+
+            text_box.append(&title);
+            text_box.append(&subtitle);
+            text_box.append(&target);
+            container.append(&text_box);
+
+            let actions_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            for (icon, tooltip, movement) in [
+                ("go-up-symbolic", "Subir", -1isize),
+                ("go-down-symbolic", "Bajar", 1isize),
+            ] {
+                let button = gtk::Button::from_icon_name(icon);
+                button.add_css_class("flat");
+                button.set_tooltip_text(Some(tooltip));
+                let weak = Rc::downgrade(self);
+                let list_ref = list.clone();
+                button.connect_clicked(move |_| {
+                    if let Some(state) = weak.upgrade() {
+                        state.move_custom_quick_action(index, movement);
+                        state.rebuild_custom_action_manager_rows(&list_ref);
+                    }
+                });
+                actions_box.append(&button);
+            }
+
+            let edit_button = gtk::Button::from_icon_name("document-edit-symbolic");
+            edit_button.add_css_class("flat");
+            edit_button.set_tooltip_text(Some("Editar"));
+            let weak = Rc::downgrade(self);
+            let list_ref = list.clone();
+            edit_button.connect_clicked(move |_| {
+                if let Some(state) = weak.upgrade() {
+                    let list = list_ref.clone();
+                    state.open_custom_action_editor(
+                        Some(index),
+                        Rc::new(move |state| {
+                            state.rebuild_custom_action_manager_rows(&list);
+                        }),
+                    );
+                }
+            });
+            actions_box.append(&edit_button);
+
+            let delete_button = gtk::Button::from_icon_name("user-trash-symbolic");
+            delete_button.add_css_class("flat");
+            delete_button.set_tooltip_text(Some("Eliminar"));
+            let weak = Rc::downgrade(self);
+            let list_ref = list.clone();
+            delete_button.connect_clicked(move |_| {
+                if let Some(state) = weak.upgrade() {
+                    state.delete_custom_quick_action(index);
+                    state.rebuild_custom_action_manager_rows(&list_ref);
+                }
+            });
+            actions_box.append(&delete_button);
+
+            container.append(&actions_box);
+            row.set_child(Some(&container));
+            list.append(&row);
+        }
+    }
+
+    #[allow(deprecated)]
+    fn open_custom_action_editor(
+        self: &Rc<Self>,
+        index: Option<usize>,
+        on_saved: Rc<dyn Fn(&Rc<Self>)>,
+    ) {
+        let existing = index.and_then(|value| {
+            self.config
+                .borrow()
+                .custom_quick_actions
+                .get(value)
+                .cloned()
+        });
+
+        let dialog = gtk::Dialog::builder()
+            .title(if existing.is_some() {
+                "Editar comando"
+            } else {
+                "Nuevo comando"
+            })
+            .modal(true)
+            .transient_for(&self.window)
+            .default_width(520)
+            .build();
+        dialog.add_button("Cancelar", gtk::ResponseType::Cancel);
+        dialog.add_button(
+            if existing.is_some() {
+                "Guardar"
+            } else {
+                "Crear"
+            },
+            gtk::ResponseType::Accept,
+        );
+
+        let content = dialog.content_area();
+        content.set_spacing(12);
+        content.set_margin_start(16);
+        content.set_margin_end(16);
+        content.set_margin_top(16);
+        content.set_margin_bottom(16);
+
+        let title_entry = gtk::Entry::new();
+        title_entry.set_placeholder_text(Some("Nombre visible"));
+        let command_entry = gtk::Entry::new();
+        command_entry.set_placeholder_text(Some("Comando a ejecutar"));
+        let subtitle_entry = gtk::Entry::new();
+        subtitle_entry.set_placeholder_text(Some("Descripción opcional"));
+        let badge_entry = gtk::Entry::new();
+        badge_entry.set_placeholder_text(Some("Etiqueta opcional, por ejemplo GIT"));
+        let target_switch = gtk::Switch::new();
+        let target_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let target_label = gtk::Label::new(Some("Abrir en un panel nuevo"));
+        target_label.set_hexpand(true);
+        target_label.set_xalign(0.0);
+        target_row.append(&target_label);
+        target_row.append(&target_switch);
+
+        if let Some(action) = existing {
+            title_entry.set_text(&action.title);
+            command_entry.set_text(&action.command);
+            subtitle_entry.set_text(&action.subtitle);
+            badge_entry.set_text(action.badge.as_deref().unwrap_or_default());
+            target_switch.set_active(action.open_in_new_pane);
+        }
+
+        content.append(&gtk::Label::new(Some("Nombre")));
+        content.append(&title_entry);
+        content.append(&gtk::Label::new(Some("Comando")));
+        content.append(&command_entry);
+        content.append(&gtk::Label::new(Some("Descripción")));
+        content.append(&subtitle_entry);
+        content.append(&gtk::Label::new(Some("Etiqueta")));
+        content.append(&badge_entry);
+        content.append(&target_row);
+
+        let weak = Rc::downgrade(self);
+        dialog.connect_response(move |dialog, response| {
+            if response != gtk::ResponseType::Accept {
+                dialog.close();
+                return;
+            }
+
+            let Some(state) = weak.upgrade() else {
+                dialog.close();
+                return;
+            };
+
+            let title = title_entry.text().trim().to_string();
+            let command = command_entry.text().trim().to_string();
+            if title.is_empty() || command.is_empty() {
+                state.show_toast("El nombre y el comando son obligatorios");
+                return;
+            }
+
+            let mut config = state.config.borrow().clone();
+            let action = CustomQuickAction {
+                title,
+                command,
+                subtitle: subtitle_entry.text().trim().to_string(),
+                badge: {
+                    let badge = badge_entry.text().trim().to_string();
+                    (!badge.is_empty()).then_some(badge)
+                },
+                open_in_new_pane: target_switch.is_active(),
+            };
+
+            if let Some(index) = index {
+                if let Some(slot) = config.custom_quick_actions.get_mut(index) {
+                    *slot = action;
+                }
+            } else {
+                config.custom_quick_actions.push(action);
+            }
+
+            state.update_config(config);
+            state.refresh_palette_if_open();
+            on_saved(&state);
+            state.show_toast("Comando personalizado guardado");
+            dialog.close();
+        });
+        dialog.present();
+    }
+
+    fn move_custom_quick_action(self: &Rc<Self>, index: usize, movement: isize) {
+        let mut config = self.config.borrow().clone();
+        let len = config.custom_quick_actions.len();
+        if index >= len {
+            return;
+        }
+
+        let next = index as isize + movement;
+        if !(0..len as isize).contains(&next) {
+            return;
+        }
+
+        config.custom_quick_actions.swap(index, next as usize);
+        self.update_config(config);
+        self.refresh_palette_if_open();
+    }
+
+    fn delete_custom_quick_action(self: &Rc<Self>, index: usize) {
+        let mut config = self.config.borrow().clone();
+        if index >= config.custom_quick_actions.len() {
+            return;
+        }
+
+        config.custom_quick_actions.remove(index);
+        self.update_config(config);
+        self.refresh_palette_if_open();
+        self.show_toast("Comando personalizado eliminado");
+    }
+
     fn update_config(&self, config: AppConfig) {
         *self.config.borrow_mut() = config.clone();
         theme::install_or_update(&config);
@@ -1123,13 +1481,29 @@ impl WindowState {
             return;
         }
 
-        let context = self.focused_pane_ref().map(|pane| pane.context());
-        let items = quick_actions::collect_actions(context.as_ref(), &self.history.borrow());
-        *self.palette_items.borrow_mut() = items;
+        self.refresh_palette_items();
         self.palette_search.set_text("");
         self.rebuild_palette_rows();
         self.palette_revealer.set_reveal_child(true);
         self.palette_search.grab_focus();
+    }
+
+    fn refresh_palette_items(&self) {
+        let context = self.focused_pane_ref().map(|pane| pane.context());
+        let config = self.config.borrow();
+        let items = quick_actions::collect_actions(
+            context.as_ref(),
+            &self.history.borrow(),
+            &config.custom_quick_actions,
+        );
+        *self.palette_items.borrow_mut() = items;
+    }
+
+    fn refresh_palette_if_open(self: &Rc<Self>) {
+        if self.palette_revealer.reveals_child() {
+            self.refresh_palette_items();
+            self.rebuild_palette_rows();
+        }
     }
 
     fn close_palette(&self) {
@@ -1216,12 +1590,16 @@ impl WindowState {
             }
 
             let row = build_palette_action_row(&item, section);
+            let gesture = gtk::GestureClick::new();
+            gesture.set_button(0);
             let weak = Rc::downgrade(self);
-            row.connect_activate(move |_| {
+            let item_for_click = item.clone();
+            gesture.connect_released(move |_, _, _, _| {
                 if let Some(state) = weak.upgrade() {
-                    state.execute_quick_action(item.clone());
+                    state.execute_quick_action(item_for_click.clone());
                 }
             });
+            row.add_controller(gesture);
 
             self.palette_list.append(&row);
         }

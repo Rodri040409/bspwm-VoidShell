@@ -1,3 +1,4 @@
+use crate::config::CustomQuickAction;
 use crate::context::{PanelContext, PanelMode};
 use crate::history::HistoryStore;
 use crate::layout::Direction;
@@ -91,6 +92,7 @@ pub struct QuickActionItem {
 pub fn collect_actions(
     context: Option<&PanelContext>,
     history: &HistoryStore,
+    custom_actions: &[CustomQuickAction],
 ) -> Vec<QuickActionItem> {
     let mut items = built_in_actions();
 
@@ -113,6 +115,7 @@ pub fn collect_actions(
     items.extend(history_action_actions(history));
     items.extend(history_command_actions(history));
     items.extend(history_connection_actions(history));
+    items.extend(custom_command_actions(custom_actions));
 
     dedupe(items)
 }
@@ -418,6 +421,38 @@ fn history_connection_actions(history: &HistoryStore) -> Vec<QuickActionItem> {
             badge: infer_badge(&entry.command, None).or(Some("CONEXIÓN".to_string())),
             target: ActionTarget::NewPane,
             command: QuickActionCommand::Shell(entry.command.clone()),
+        })
+        .collect()
+}
+
+fn custom_command_actions(custom_actions: &[CustomQuickAction]) -> Vec<QuickActionItem> {
+    custom_actions
+        .iter()
+        .filter(|entry| !entry.title.trim().is_empty() && !entry.command.trim().is_empty())
+        .map(|entry| {
+            let (section, _) = classify_shell_command(&entry.command, None);
+            QuickActionItem {
+                section,
+                title: entry.title.trim().to_string(),
+                subtitle: if entry.subtitle.trim().is_empty() {
+                    entry.command.trim().to_string()
+                } else {
+                    entry.subtitle.trim().to_string()
+                },
+                badge: entry
+                    .badge
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|badge| !badge.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| infer_badge(&entry.command, None)),
+                target: if entry.open_in_new_pane {
+                    ActionTarget::NewPane
+                } else {
+                    ActionTarget::CurrentPane
+                },
+                command: QuickActionCommand::Shell(entry.command.trim().to_string()),
+            }
         })
         .collect()
 }

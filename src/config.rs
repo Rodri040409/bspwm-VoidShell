@@ -40,6 +40,21 @@ impl Default for BannerInfoLayout {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct CustomQuickAction {
+    #[serde(rename = "nombre", alias = "title")]
+    pub title: String,
+    #[serde(rename = "comando", alias = "command")]
+    pub command: String,
+    #[serde(rename = "descripcion", alias = "subtitle")]
+    pub subtitle: String,
+    #[serde(rename = "etiqueta", alias = "badge")]
+    pub badge: Option<String>,
+    #[serde(rename = "abrir_en_panel_nuevo", alias = "open_in_new_pane")]
+    pub open_in_new_pane: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -86,6 +101,12 @@ pub struct AppConfig {
     pub show_context_bar: bool,
     #[serde(rename = "activar_acciones_rapidas", alias = "enable_quick_actions")]
     pub enable_quick_actions: bool,
+    #[serde(
+        rename = "comandos_personalizados",
+        alias = "custom_quick_actions",
+        default
+    )]
+    pub custom_quick_actions: Vec<CustomQuickAction>,
 }
 
 impl Default for AppConfig {
@@ -112,6 +133,7 @@ impl Default for AppConfig {
             animation_speed: 1.0,
             show_context_bar: true,
             enable_quick_actions: true,
+            custom_quick_actions: Vec::new(),
         }
     }
 }
@@ -166,6 +188,7 @@ mod tests {
         assert!(serialized.contains("mostrar_banner_inicio = true"));
         assert!(serialized.contains("posicion_info_banner = \"derecha\""));
         assert!(serialized.contains("estilo_cursor = \"bloque\""));
+        assert!(serialized.contains("comandos_personalizados = []"));
         assert!(!serialized.contains("shell_path"));
         assert!(!serialized.contains("banner_info_layout"));
     }
@@ -180,6 +203,12 @@ show_startup_banner = false
 show_banner_on_new_panes = false
 banner_info_layout = "below"
 enable_quick_actions = false
+[[custom_quick_actions]]
+title = "htop rápido"
+command = "htop"
+subtitle = "Monitor"
+badge = "MONITOR"
+open_in_new_pane = true
 "#,
         )
         .expect("debe leer la config antigua");
@@ -190,5 +219,8 @@ enable_quick_actions = false
         assert!(!config.show_banner_on_new_panes);
         assert_eq!(config.banner_info_layout, BannerInfoLayout::Below);
         assert!(!config.enable_quick_actions);
+        assert_eq!(config.custom_quick_actions.len(), 1);
+        assert_eq!(config.custom_quick_actions[0].title, "htop rápido");
+        assert!(config.custom_quick_actions[0].open_in_new_pane);
     }
 }
