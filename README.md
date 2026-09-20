@@ -123,12 +123,12 @@ cargo run -- --execute "git status"
 ## Atajos principales
 
 - `Alt+T`: nuevo panel
-- `Alt+H`: split horizontal
-- `Alt+V`: split vertical
+- `Alt+H` / `Alt+V`: dividir el panel activo en horizontal / vertical
+- `Alt+O`: alternar la orientación de la división que contiene al panel activo
+- `Alt+Shift+B`: equilibrar todos los divisores del mosaico a 50/50
+- `Alt+Flechas`: mover el foco; `Alt+Shift+Flechas`: redimensionar
+- `Ctrl+Alt+Flechas`: intercambiar el panel activo con el vecino en esa dirección
 - `Alt+Q`: cerrar panel
-- `Alt+Arrow`: mover foco
-- `Alt+Shift+Arrow`: redimensionar split
-- `Ctrl+Alt+Arrow`: intercambiar el panel activo con el vecino más cercano
 - `Alt+Shift+Enter`: zoom/fullscreen del panel activo
 - `Alt+Enter` o `F11`: fullscreen de la ventana
 - `Alt+I`: imprimir el banner ASCII con info en el panel activo
@@ -178,6 +178,8 @@ Abre la palette y escribe comandos como estos:
 :swap right
 :swap up
 :swap down
+:rotate
+:balance
 :theme red
 :theme green
 :theme default

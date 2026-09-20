@@ -26,6 +26,8 @@ pub enum QuickActionCommand {
 pub enum InternalAction {
     ShowInfo,
     TogglePaneZoom,
+    ToggleFocusedSplitAxis,
+    BalanceLayout,
     SwapPane(Direction),
     SetPanePalette(Option<PanePalettePreset>),
 }
@@ -238,6 +240,25 @@ fn built_in_actions() -> Vec<QuickActionItem> {
         badge: Some("PANEL".to_string()),
         target: ActionTarget::CurrentPane,
         command: QuickActionCommand::Internal(InternalAction::TogglePaneZoom),
+    });
+
+    items.push(QuickActionItem {
+        section: QuickActionSection::Layout,
+        title: "Alternar orientación del mosaico activo".to_string(),
+        subtitle: "Convierte la división que contiene al panel activo entre fila y columna."
+            .to_string(),
+        badge: Some("MOSAICO".to_string()),
+        target: ActionTarget::CurrentPane,
+        command: QuickActionCommand::Internal(InternalAction::ToggleFocusedSplitAxis),
+    });
+
+    items.push(QuickActionItem {
+        section: QuickActionSection::Layout,
+        title: "Equilibrar mosaico".to_string(),
+        subtitle: "Devuelve todos los divisores del mosaico a una proporción 50/50.".to_string(),
+        badge: Some("MOSAICO".to_string()),
+        target: ActionTarget::CurrentPane,
+        command: QuickActionCommand::Internal(InternalAction::BalanceLayout),
     });
 
     if let Some(editor) = first_available_command(&["nvim .", "vim .", "hx ."]) {
@@ -529,6 +550,8 @@ fn action_identity(item: &QuickActionItem) -> String {
         QuickActionCommand::Internal(action) => match action {
             InternalAction::ShowInfo => "internal:show-info".to_string(),
             InternalAction::TogglePaneZoom => "internal:toggle-zoom".to_string(),
+            InternalAction::ToggleFocusedSplitAxis => "internal:toggle-split-axis".to_string(),
+            InternalAction::BalanceLayout => "internal:balance-layout".to_string(),
             InternalAction::SwapPane(direction) => {
                 format!("internal:swap:{}", direction_slug(*direction))
             }
@@ -565,6 +588,31 @@ fn internal_query_actions(query: &str) -> Vec<QuickActionItem> {
             badge: Some("PANEL".to_string()),
             target: ActionTarget::CurrentPane,
             command: QuickActionCommand::Internal(InternalAction::TogglePaneZoom),
+        }];
+    }
+
+    if matches!(
+        command,
+        "rotate" | "orient" | "orientation" | "rotar" | "orientar"
+    ) {
+        return vec![QuickActionItem {
+            section: QuickActionSection::Suggested,
+            title: "Alternar orientación del mosaico activo".to_string(),
+            subtitle: "Convierte la división del panel activo entre fila y columna.".to_string(),
+            badge: Some("MOSAICO".to_string()),
+            target: ActionTarget::CurrentPane,
+            command: QuickActionCommand::Internal(InternalAction::ToggleFocusedSplitAxis),
+        }];
+    }
+
+    if matches!(command, "balance" | "equalize" | "equilibrar") {
+        return vec![QuickActionItem {
+            section: QuickActionSection::Suggested,
+            title: "Equilibrar mosaico".to_string(),
+            subtitle: "Restablecer todos los divisores del mosaico a 50/50.".to_string(),
+            badge: Some("MOSAICO".to_string()),
+            target: ActionTarget::CurrentPane,
+            command: QuickActionCommand::Internal(InternalAction::BalanceLayout),
         }];
     }
 

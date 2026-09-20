@@ -372,6 +372,8 @@ impl WindowState {
         self.install_simple_action("palette", |state| state.toggle_palette());
         self.install_simple_action("fullscreen", |state| state.toggle_fullscreen());
         self.install_simple_action("zoom-pane", |state| state.toggle_pane_zoom());
+        self.install_simple_action("rotate-split", |state| state.rotate_focused_split());
+        self.install_simple_action("balance-layout", |state| state.balance_layout());
         self.install_simple_action("show-info", |state| state.show_info_banner());
         self.install_simple_action("swap-left", |state| state.swap_focused(Direction::Left));
         self.install_simple_action("swap-right", |state| state.swap_focused(Direction::Right));
@@ -416,6 +418,10 @@ impl WindowState {
             .set_accels_for_action("win.fullscreen", &["<Alt>Return", "F11"]);
         self.app
             .set_accels_for_action("win.zoom-pane", &["<Alt><Shift>Return"]);
+        self.app
+            .set_accels_for_action("win.rotate-split", &["<Alt>o"]);
+        self.app
+            .set_accels_for_action("win.balance-layout", &["<Alt><Shift>b"]);
         self.app.set_accels_for_action("win.show-info", &["<Alt>i"]);
         self.app
             .set_accels_for_action("win.swap-left", &["<Primary><Alt>Left"]);
@@ -715,9 +721,12 @@ impl WindowState {
             return;
         };
 
-        self.zoomed_pane.set(None);
         let axis = self.smart_split_axis(current_id);
         let position = self.smart_insert_position(current_id);
+        // Decide the axis while the zoom state is still known.  A zoomed
+        // widget covers the whole surface, so its on-screen rectangle is not
+        // representative of its place in the tile tree.
+        self.zoomed_pane.set(None);
         self.spawn_split(current_id, axis, position);
     }
 
@@ -1010,6 +1019,37 @@ impl WindowState {
             self.show_toast("Panel ampliado");
         }
         self.rebuild_layout();
+    }
+
+    fn rotate_focused_split(self: &Rc<Self>) {
+        let Some(pane_id) = self.focused_pane.get() else {
+            return;
+        };
+
+        if !self.layout.borrow_mut().toggle_parent_split_axis(pane_id) {
+            self.show_toast("No hay una división que reorientar en este panel");
+            return;
+        }
+
+        // A rotated split should be visible immediately, even if it was
+        // initiated while its child was zoomed.
+        self.zoomed_pane.set(None);
+        self.rebuild_layout();
+        self.show_toast("Orientación del mosaico alternada");
+    }
+
+    fn balance_layout(self: &Rc<Self>) {
+        if self.layout.borrow().leaf_count() < 2 {
+            self.show_toast("Se necesitan al menos dos paneles para equilibrar");
+            return;
+        }
+
+        if self.layout.borrow_mut().balance_ratios() {
+            self.rebuild_layout();
+            self.show_toast("Mosaico equilibrado");
+        } else {
+            self.show_toast("El mosaico ya está equilibrado");
+        }
     }
 
     fn show_info_banner(&self) {
@@ -1708,6 +1748,8 @@ impl WindowState {
         match action {
             InternalAction::ShowInfo => self.show_info_banner(),
             InternalAction::TogglePaneZoom => self.toggle_pane_zoom(),
+            InternalAction::ToggleFocusedSplitAxis => self.rotate_focused_split(),
+            InternalAction::BalanceLayout => self.balance_layout(),
             InternalAction::SwapPane(direction) => self.swap_focused(*direction),
             InternalAction::SetPanePalette(preset) => {
                 if let Some(pane) = self.focused_pane_ref() {
@@ -1881,31 +1923,67 @@ impl WindowState {
     }
 
     fn smart_split_axis(&self, pane_id: u64) -> SplitAxis {
+        let parent_axis = self.layout.borrow().parent_split_axis(pane_id);
+
+        // When adding from zoom, use the tree rather than the temporary
+        // full-window bounds.  Alternating relative to the parent prevents
+        // the new pane from extending an unbroken horizontal/vertical strip.
+        if self.zoomed_pane.get().is_some() {
+            return parent_axis
+                .map(opposite_split_axis)
+                .unwrap_or(SplitAxis::Vertical);
+        }
+
         let depth = self.layout.borrow().leaf_depth(pane_id).unwrap_or(0);
 
-        if let Some(rect) = self.pane_rect(pane_id) {
+        let geometry_axis = if let Some(rect) = self.pane_rect(pane_id) {
             let width = rect.width();
             let height = rect.height();
             if width > 0.0 && height > 0.0 {
                 let ratio = width / height;
                 if ratio >= 1.24 {
-                    return SplitAxis::Vertical;
+                    Some(SplitAxis::Vertical)
+                } else if ratio <= 0.92 {
+                    Some(SplitAxis::Horizontal)
+                } else {
+                    None
                 }
-                if ratio <= 0.92 {
-                    return SplitAxis::Horizontal;
-                }
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
-        if depth % 2 == 0 {
+        let fallback_axis = if depth.is_multiple_of(2) {
             SplitAxis::Vertical
         } else {
             SplitAxis::Horizontal
+        };
+        let preferred_axis = geometry_axis.unwrap_or(fallback_axis);
+
+        // Never extend the exact same axis directly below its parent. This
+        // breaks long strips into grids even when the child itself is narrow
+        // or short, and also covers allocations whose bounds are unavailable.
+        if let Some(axis) = parent_axis {
+            return if preferred_axis == axis {
+                opposite_split_axis(axis)
+            } else {
+                preferred_axis
+            };
         }
+
+        preferred_axis
     }
 
     fn smart_insert_position(&self, pane_id: u64) -> InsertPosition {
-        if self.layout.borrow().leaf_depth(pane_id).unwrap_or(0) % 2 == 0 {
+        if self
+            .layout
+            .borrow()
+            .leaf_depth(pane_id)
+            .unwrap_or(0)
+            .is_multiple_of(2)
+        {
             InsertPosition::After
         } else {
             InsertPosition::Before
@@ -2105,6 +2183,13 @@ fn pane_spawn_motion(axis: SplitAxis, position: InsertPosition) -> PaneSpawnMoti
         (SplitAxis::Vertical, InsertPosition::After) => PaneSpawnMotion::FromRight,
         (SplitAxis::Horizontal, InsertPosition::Before) => PaneSpawnMotion::FromTop,
         (SplitAxis::Horizontal, InsertPosition::After) => PaneSpawnMotion::FromBottom,
+    }
+}
+
+fn opposite_split_axis(axis: SplitAxis) -> SplitAxis {
+    match axis {
+        SplitAxis::Horizontal => SplitAxis::Vertical,
+        SplitAxis::Vertical => SplitAxis::Horizontal,
     }
 }
 

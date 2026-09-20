@@ -231,7 +231,7 @@ pub fn install_local_desktop_integration() -> Option<()> {
     let pixmaps_target = data_home
         .join("pixmaps")
         .join(format!("{}.png", constants::APP_ICON));
-    let current_exe = env::current_exe().ok()?;
+    let current_exe = desktop_launch_executable(env::current_exe().ok()?);
     let desktop_content = format!(
         "[Desktop Entry]\nName={name}\nComment=VoidShell tiling terminal with contextual chrome\nExec={exec} %F\nIcon={icon}\nTerminal=false\nType=Application\nCategories=System;TerminalEmulator;GTK;\nKeywords=terminal;shell;console;pty;\nMimeType=x-scheme-handler/terminal;inode/directory;\nStartupNotify=true\nStartupWMClass={wm_class}\nX-ExecArg=--execute\nX-TerminalArgDir=--working-directory\n",
         name = constants::APP_NAME,
@@ -290,6 +290,33 @@ pub fn install_local_desktop_integration() -> Option<()> {
     }
 
     Some(())
+}
+
+/// Keeps the desktop launcher on the production build when a developer also
+/// runs the project through `cargo run`.  Without this, a debug run rewrites
+/// the launcher to `target/debug/termvoid` and menu launches silently use an
+/// older, unoptimised binary.
+#[cfg(not(windows))]
+fn desktop_launch_executable(current_exe: PathBuf) -> PathBuf {
+    let is_debug_binary = current_exe
+        .parent()
+        .is_some_and(|parent| parent.file_name().is_some_and(|name| name == "debug"));
+
+    if !is_debug_binary {
+        return current_exe;
+    }
+
+    let Some(target_dir) = current_exe.parent().and_then(Path::parent) else {
+        return current_exe;
+    };
+    let Some(executable_name) = current_exe.file_name() else {
+        return current_exe;
+    };
+    let release_exe = target_dir.join("release").join(executable_name);
+    release_exe
+        .exists()
+        .then_some(release_exe)
+        .unwrap_or(current_exe)
 }
 
 #[cfg(windows)]

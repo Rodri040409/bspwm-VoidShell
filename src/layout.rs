@@ -140,6 +140,91 @@ impl TileTree {
         find_path(root, target, &mut path).then_some(path.len())
     }
 
+    /// Returns the axis of the split that directly contains `target`.
+    ///
+    /// This is useful for choosing a balanced automatic split when a widget
+    /// has not been allocated yet (for example, immediately after unzooming).
+    pub fn parent_split_axis(&self, target: u64) -> Option<SplitAxis> {
+        fn recurse(node: &TileNode, target: u64) -> Option<SplitAxis> {
+            let TileNode::Split {
+                axis,
+                first,
+                second,
+                ..
+            } = node
+            else {
+                return None;
+            };
+
+            if matches!(**first, TileNode::Leaf(id) if id == target)
+                || matches!(**second, TileNode::Leaf(id) if id == target)
+            {
+                return Some(*axis);
+            }
+
+            recurse(first, target).or_else(|| recurse(second, target))
+        }
+
+        self.root.as_ref().and_then(|root| recurse(root, target))
+    }
+
+    /// Flips the axis of the smallest split containing `target`.
+    ///
+    /// The leaves and their order are preserved, so this is a safe way to
+    /// turn a row into a column (or the reverse) without moving sessions.
+    pub fn toggle_parent_split_axis(&mut self, target: u64) -> bool {
+        fn recurse(node: &mut TileNode, target: u64) -> bool {
+            let TileNode::Split {
+                axis,
+                first,
+                second,
+                ..
+            } = node
+            else {
+                return false;
+            };
+
+            if matches!(**first, TileNode::Leaf(id) if id == target)
+                || matches!(**second, TileNode::Leaf(id) if id == target)
+            {
+                *axis = match *axis {
+                    SplitAxis::Horizontal => SplitAxis::Vertical,
+                    SplitAxis::Vertical => SplitAxis::Horizontal,
+                };
+                return true;
+            }
+
+            recurse(first, target) || recurse(second, target)
+        }
+
+        self.root.as_mut().is_some_and(|root| recurse(root, target))
+    }
+
+    /// Restores every divider to an even 50/50 split while keeping the tree
+    /// topology and all panes intact.
+    pub fn balance_ratios(&mut self) -> bool {
+        fn recurse(node: &mut TileNode, changed: &mut bool) {
+            if let TileNode::Split {
+                ratio,
+                first,
+                second,
+                ..
+            } = node
+            {
+                *changed |= (*ratio - 0.5).abs() > f32::EPSILON;
+                *ratio = 0.5;
+                recurse(first, changed);
+                recurse(second, changed);
+            }
+        }
+
+        let mut changed = false;
+        if let Some(root) = self.root.as_mut() {
+            recurse(root, &mut changed);
+        }
+        changed
+    }
+
     pub fn leaf_edge_direction(&self, target: u64) -> Option<Direction> {
         let root = self.root.as_ref()?;
         let mut path = Vec::new();
@@ -306,8 +391,18 @@ impl TileTree {
 
                     let split = *split_id;
                     let orientation = *axis;
+                    // A newly-created Paned reports one or more temporary
+                    // positions before it has received its real allocation.
+                    // Do not persist those values: otherwise a rebuild can
+                    // turn a 50/50 split into a narrow (clamped) 15/85 one.
+                    let accepts_ratio_updates = Rc::new(Cell::new(false));
                     let change_callback = on_ratio_changed.clone();
+                    let accepts_updates = accepts_ratio_updates.clone();
                     paned.connect_position_notify(move |widget| {
+                        if !accepts_updates.get() {
+                            return;
+                        }
+
                         let total = match orientation {
                             SplitAxis::Vertical => widget.width(),
                             SplitAxis::Horizontal => widget.height(),
@@ -322,6 +417,7 @@ impl TileTree {
                     let position_ratio = *ratio;
                     let frames_left = Cell::new(18u8);
                     let stable_frames = Cell::new(0u8);
+                    let accepts_updates = accepts_ratio_updates.clone();
                     target.add_tick_callback(move |widget, _| {
                         let total = match orientation {
                             SplitAxis::Vertical => widget.width(),
@@ -348,6 +444,7 @@ impl TileTree {
 
                         let remaining = frames_left.get();
                         if remaining == 0 || stable_frames.get() >= 2 {
+                            accepts_updates.set(true);
                             gtk::glib::ControlFlow::Break
                         } else {
                             frames_left.set(remaining.saturating_sub(1));
@@ -423,5 +520,108 @@ fn split_meta_at_path(node: &TileNode, path: &[ChildSide]) -> Option<(u64, Split
     match path[0] {
         ChildSide::First => split_meta_at_path(first, &path[1..]),
         ChildSide::Second => split_meta_at_path(second, &path[1..]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn three_pane_tree() -> TileTree {
+        let mut tree = TileTree::default();
+        tree.set_root_leaf(1);
+        tree.split_leaf_with_position(1, 2, 10, SplitAxis::Vertical, InsertPosition::After);
+        tree.split_leaf_with_position(2, 3, 11, SplitAxis::Horizontal, InsertPosition::After);
+        tree
+    }
+
+    fn ratios(node: &TileNode, output: &mut Vec<f32>) {
+        if let TileNode::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } = node
+        {
+            output.push(*ratio);
+            ratios(first, output);
+            ratios(second, output);
+        }
+    }
+
+    #[test]
+    fn conserva_el_orden_al_insertar_antes_y_despues() {
+        let mut tree = TileTree::default();
+        tree.set_root_leaf(2);
+        tree.split_leaf_with_position(2, 1, 10, SplitAxis::Vertical, InsertPosition::Before);
+        tree.split_leaf_with_position(2, 3, 11, SplitAxis::Horizontal, InsertPosition::After);
+
+        assert_eq!(tree.leaf_ids(), vec![1, 2, 3]);
+        assert_eq!(tree.leaf_count(), 3);
+    }
+
+    #[test]
+    fn rota_solo_el_contenedor_directo_del_panel() {
+        let mut tree = three_pane_tree();
+
+        assert_eq!(tree.parent_split_axis(3), Some(SplitAxis::Horizontal));
+        assert!(tree.toggle_parent_split_axis(3));
+        assert_eq!(tree.parent_split_axis(3), Some(SplitAxis::Vertical));
+        assert_eq!(tree.parent_split_axis(1), Some(SplitAxis::Vertical));
+        assert_eq!(tree.leaf_ids(), vec![1, 2, 3]);
+        assert!(!tree.toggle_parent_split_axis(999));
+    }
+
+    #[test]
+    fn elimina_hojas_y_colapsa_sin_perder_las_restantes() {
+        let mut tree = three_pane_tree();
+
+        assert!(tree.remove_leaf(2));
+        assert_eq!(tree.leaf_ids(), vec![1, 3]);
+        assert_eq!(tree.parent_split_axis(3), Some(SplitAxis::Vertical));
+        assert!(tree.remove_leaf(1));
+        assert_eq!(tree.leaf_ids(), vec![3]);
+        assert!(!tree.remove_leaf(99));
+    }
+
+    #[test]
+    fn intercambia_solo_las_hojas_solicitadas() {
+        let mut tree = three_pane_tree();
+
+        assert!(tree.swap_leaves(1, 3));
+        assert_eq!(tree.leaf_ids(), vec![3, 2, 1]);
+        assert!(!tree.swap_leaves(1, 1));
+        assert!(!tree.swap_leaves(1, 99));
+    }
+
+    #[test]
+    fn redimensiona_el_divisor_adecuado_y_respeta_limites() {
+        let mut tree = three_pane_tree();
+
+        assert!(tree.resize_leaf(3, Direction::Up, 0.2));
+        assert_eq!(tree.parent_split_axis(3), Some(SplitAxis::Horizontal));
+        assert!(tree.resize_leaf(1, Direction::Right, 10.0));
+
+        let mut current_ratios = Vec::new();
+        ratios(tree.root.as_ref().unwrap(), &mut current_ratios);
+        assert!(
+            current_ratios
+                .iter()
+                .all(|ratio| (0.15..=0.85).contains(ratio))
+        );
+        assert!(!tree.resize_leaf(1, Direction::Up, 0.1));
+    }
+
+    #[test]
+    fn equilibrar_restablece_todos_los_divisores() {
+        let mut tree = three_pane_tree();
+        tree.update_split_ratio(10, 0.25);
+        tree.update_split_ratio(11, 0.75);
+
+        assert!(tree.balance_ratios());
+        assert!(!tree.balance_ratios());
+        let mut current_ratios = Vec::new();
+        ratios(tree.root.as_ref().unwrap(), &mut current_ratios);
+        assert_eq!(current_ratios, vec![0.5, 0.5]);
     }
 }
