@@ -774,6 +774,14 @@ impl WindowState {
             return;
         }
 
+        // End the foreground terminal job before starting the visual close.
+        // In particular, interactive CLIs need the PTY hangup to release any
+        // server-side session/conversation lock rather than being orphaned for
+        // the duration of the animation.
+        if let Some(pane) = self.panes.borrow().get(&pane_id) {
+            pane.hangup_foreground_process_group();
+        }
+
         if self.layout.borrow().leaf_count() <= 1 {
             self.end_session_for_pane(pane_id);
             self.window.close();

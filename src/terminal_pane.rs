@@ -411,9 +411,40 @@ impl TerminalPane {
             return false;
         }
 
+        // Use VTE's clipboard API instead of synthesising a key event.  This
+        // also covers selections made inside full-screen terminal UIs such as
+        // Codex's message editor.
         self.terminal.copy_clipboard_format(vte::Format::Text);
         (self.callbacks.on_notification)("Copiado desde el panel activo".to_string());
         true
+    }
+
+    /// Closes the foreground job attached to this PTY before the widget is
+    /// removed.  Merely dropping a VTE widget can leave a foreground TUI alive
+    /// briefly during the pane close animation; clients such as Codex then keep
+    /// their conversation lock.  A terminal hangup is the normal close signal
+    /// and gives those clients an opportunity to release their state.
+    pub fn hangup_foreground_process_group(&self) {
+        let Some(pty) = self.terminal.pty() else {
+            return;
+        };
+
+        let pty_fd = pty.fd().as_raw_fd();
+        // `tcgetpgrp` identifies the process group currently using the
+        // terminal, which may be a child of the shell rather than the shell
+        // process VTE originally spawned.
+        let foreground_group = unsafe { libc::tcgetpgrp(pty_fd) };
+        let target = if foreground_group > 0 {
+            -foreground_group
+        } else {
+            self.child_pid.get().map(|pid| pid.0).unwrap_or_default()
+        };
+
+        if target != 0 {
+            // Ignore ESRCH: the child may have naturally exited between the
+            // close request and this call.
+            let _ = unsafe { libc::kill(target, libc::SIGHUP) };
+        }
     }
 
     pub fn cut_selection_to_clipboard(&self) -> bool {
@@ -674,7 +705,11 @@ impl TerminalPane {
                 _ => glib::Propagation::Proceed,
             }
         });
-        self.terminal.add_controller(key_controller);
+        // Attach above the VTE widget so full-screen terminal applications
+        // cannot consume Ctrl+C/Ctrl+Shift+C before a selected message is
+        // placed on the system clipboard.  When there is no selection, the
+        // event still proceeds to VTE as the normal interrupt key.
+        self.shell_box.add_controller(key_controller);
     }
 
     fn install_runtime_handlers(self: &Rc<Self>) {
