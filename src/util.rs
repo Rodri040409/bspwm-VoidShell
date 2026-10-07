@@ -870,7 +870,12 @@ __voidshell_publish_python_venv() {
   printf '%s\n' "$next_value" >| "$state_file" 2>/dev/null || true
 }
 
+__voidshell_publish_cwd() {
+  printf '\033]7;file://%s%s\033\\' "${HOSTNAME:-localhost}" "$PWD"
+}
+
 __voidshell_prompt_hook() {
+  __voidshell_publish_cwd
   __voidshell_publish_python_venv
 }
 
@@ -1032,6 +1037,7 @@ mod tests {
     #[test]
     fn genera_rcfile_de_bash_con_hook_de_venv() {
         assert!(VOIDSHELL_BASH_INTEGRATION.contains("__voidshell_publish_python_venv"));
+        assert!(VOIDSHELL_BASH_INTEGRATION.contains("__voidshell_publish_cwd"));
         assert!(VOIDSHELL_BASH_INTEGRATION.contains("__voidshell_install_prompt_hook"));
         assert!(VOIDSHELL_BASH_INTEGRATION.contains("VOIDSHELL_VENV_FILE"));
     }

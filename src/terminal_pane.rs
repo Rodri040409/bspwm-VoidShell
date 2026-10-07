@@ -12,14 +12,11 @@ use std::cell::{Cell, RefCell};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::mpsc::{self, TryRecvError};
-use std::thread;
 use std::time::Duration;
 use vte::prelude::*;
 
 const LINK_REGEX_PATTERN: &str =
     r#"(?i)\b(?:[a-z][a-z0-9+.-]*://|mailto:|www\.)[^\s<>'"`()\[\]{}]+"#;
-const CONTEXT_RESULT_POLL_MS: u64 = 120;
 
 #[derive(Clone)]
 pub struct PaneCallbacks {
@@ -65,6 +62,8 @@ pub struct TerminalPane {
     child_pid: Cell<Option<glib::Pid>>,
     pending_commands: RefCell<Vec<String>>,
     context: RefCell<PanelContext>,
+    current_directory_hint: RefCell<Option<PathBuf>>,
+    directory_hint_locked: Cell<bool>,
     context_tick: Cell<u64>,
     context_refresh_in_flight: Cell<bool>,
     context_refresh_queued: Cell<bool>,
@@ -193,6 +192,12 @@ impl TerminalPane {
 
         revealer.set_child(Some(&shell_box));
 
+        if let Some(directory) = working_directory.as_deref() {
+            let display_directory = util::display_path(directory);
+            title_label.set_text(&display_directory);
+            title_label.set_tooltip_text(Some(&display_directory));
+        }
+
         let pane = Rc::new(Self {
             id,
             revealer,
@@ -212,6 +217,8 @@ impl TerminalPane {
             child_pid: Cell::new(None),
             pending_commands: RefCell::new(Vec::new()),
             context: RefCell::new(PanelContext::default()),
+            current_directory_hint: RefCell::new(working_directory.clone()),
+            directory_hint_locked: Cell::new(working_directory.is_some()),
             context_tick: Cell::new(0),
             context_refresh_in_flight: Cell::new(false),
             context_refresh_queued: Cell::new(false),
@@ -234,6 +241,7 @@ impl TerminalPane {
         pane.install_keyboard_shortcuts();
         pane.install_runtime_handlers();
         pane.spawn_shell(working_directory, show_banner);
+        pane.schedule_directory_hint_unlock();
         pane.animate_open(config, spawn_motion);
         pane.schedule_context_refresh();
 
@@ -254,7 +262,48 @@ impl TerminalPane {
     }
 
     pub fn current_directory(&self) -> Option<PathBuf> {
-        self.context.borrow().cwd.clone()
+        // Splitting is a hot path. The hint is initialized before the shell is
+        // spawned and refreshed whenever the terminal reports a directory
+        // change, so opening a mosaic never has to scan /proc first.
+        self.current_directory_hint
+            .borrow()
+            .clone()
+            .or_else(|| self.context.borrow().cwd.clone())
+    }
+
+    fn directory_from_process(&self) -> Option<PathBuf> {
+        #[cfg(unix)]
+        let pty_fd = self.terminal.pty().map(|pty| pty.fd().as_raw_fd());
+        #[cfg(not(unix))]
+        let pty_fd = Option::<i32>::None;
+
+        context::detect_current_directory(self.child_pid.get().map(|pid| pid.0), pty_fd)
+    }
+
+    fn refresh_current_directory_hint(&self) {
+        if let Some(directory) = self.directory_from_process() {
+            let changed = self.current_directory_hint.borrow().as_ref() != Some(&directory);
+            *self.current_directory_hint.borrow_mut() = Some(directory.clone());
+
+            if changed {
+                let display_directory = util::display_path(&directory);
+                self.title_label.set_text(&display_directory);
+                self.title_label.set_tooltip_text(Some(&display_directory));
+            }
+        }
+    }
+
+    fn schedule_directory_hint_unlock(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        gtk::glib::timeout_add_local_once(Duration::from_millis(3_000), move || {
+            let Some(pane) = weak.upgrade() else {
+                return;
+            };
+
+            pane.directory_hint_locked.set(false);
+            pane.refresh_current_directory_hint();
+            pane.refresh_context();
+        });
     }
 
     pub fn set_active_python_venv_hint(&self, venv_path: Option<PathBuf>) {
@@ -387,8 +436,6 @@ impl TerminalPane {
     }
 
     pub fn apply_config(&self, config: &AppConfig) {
-        theme::install_or_update(config);
-
         self.terminal_wrap.set_margin_top(config.panel_padding);
         self.terminal_wrap.set_margin_bottom(config.panel_padding);
         self.terminal_wrap.set_margin_start(config.panel_padding);
@@ -583,11 +630,8 @@ impl TerminalPane {
         key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(self);
         key_controller.connect_key_pressed(move |_, key, _, modifiers| {
-            let shortcut_pressed = modifiers.contains(
-                gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::SHIFT_MASK,
-            );
-
-            if !shortcut_pressed {
+            let primary_pressed = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            if !primary_pressed {
                 return glib::Propagation::Proceed;
             }
 
@@ -595,14 +639,23 @@ impl TerminalPane {
                 return glib::Propagation::Proceed;
             };
 
+            if key.to_lower() == gtk::gdk::Key::c {
+                // Preserve Ctrl+C as the terminal interrupt when nothing is selected,
+                // but make it copy selected output. This is particularly useful for
+                // long responses printed by CLI assistants.
+                return if pane.copy_selection_to_clipboard() {
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                };
+            }
+
+            // The rest retain the standard terminal bindings: Ctrl+Shift+X/V/A.
+            if !modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
+                return glib::Propagation::Proceed;
+            }
+
             match key.to_lower() {
-                gtk::gdk::Key::c => {
-                    if pane.copy_selection_to_clipboard() {
-                        glib::Propagation::Stop
-                    } else {
-                        glib::Propagation::Proceed
-                    }
-                }
                 gtk::gdk::Key::x => {
                     if pane.cut_selection_to_clipboard() {
                         glib::Propagation::Stop
@@ -629,6 +682,8 @@ impl TerminalPane {
         self.terminal
             .connect_notify_local(Some("current-directory-uri"), move |_, _| {
                 if let Some(pane) = weak.upgrade() {
+                    pane.directory_hint_locked.set(false);
+                    pane.refresh_current_directory_hint();
                     pane.refresh_context();
                 }
             });
@@ -762,9 +817,7 @@ impl TerminalPane {
         let previous = self.context.borrow().clone();
         let is_active = self.is_active.get();
         let python_venv_state_file = self.python_venv_state_file.clone();
-        let (sender, receiver) = mpsc::channel();
-
-        thread::spawn(move || {
+        let task = gio::spawn_blocking(move || {
             let mut next = context::detect_panel_context(shell_pid, pty_fd, &shell_path);
             if next.active_python_venv.is_none() {
                 next.active_python_venv = util::read_python_venv_state(&python_venv_state_file);
@@ -799,38 +852,42 @@ impl TerminalPane {
                 previous.network.public_ip.clone()
             };
 
-            let _ = sender.send(next);
+            next
         });
-
-        self.poll_context_refresh(receiver);
-    }
-
-    fn poll_context_refresh(self: &Rc<Self>, receiver: mpsc::Receiver<PanelContext>) {
         let weak = Rc::downgrade(self);
-        gtk::glib::timeout_add_local(Duration::from_millis(CONTEXT_RESULT_POLL_MS), move || {
-            match receiver.try_recv() {
+        glib::MainContext::default().spawn_local(async move {
+            match task.await {
                 Ok(next) => {
                     if let Some(pane) = weak.upgrade() {
                         pane.finish_context_refresh(next);
                     }
-                    gtk::glib::ControlFlow::Break
                 }
-                Err(TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
-                Err(TryRecvError::Disconnected) => {
+                Err(_) => {
                     if let Some(pane) = weak.upgrade() {
                         pane.context_refresh_in_flight.set(false);
                         if pane.context_refresh_queued.replace(false) {
                             pane.refresh_context();
                         }
                     }
-                    gtk::glib::ControlFlow::Break
                 }
             }
         });
     }
 
-    fn finish_context_refresh(self: &Rc<Self>, next: PanelContext) {
+    fn finish_context_refresh(self: &Rc<Self>, mut next: PanelContext) {
         self.context_refresh_in_flight.set(false);
+
+        if self.directory_hint_locked.get() {
+            if let Some(directory) = self.current_directory_hint.borrow().clone() {
+                if next.cwd.as_ref() != Some(&directory) {
+                    next.cwd = Some(directory);
+                    next.git_branch = None;
+                    next.python_project = None;
+                }
+            }
+        } else if let Some(directory) = next.cwd.clone() {
+            *self.current_directory_hint.borrow_mut() = Some(directory);
+        }
 
         let previous = self.context.borrow().clone();
         if previous != next {

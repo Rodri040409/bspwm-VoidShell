@@ -91,7 +91,7 @@ pub struct QuickActionItem {
     pub command: QuickActionCommand,
 }
 
-pub fn collect_actions(
+pub fn collect_local_actions(
     context: Option<&PanelContext>,
     history: &HistoryStore,
     custom_actions: &[CustomQuickAction],
@@ -110,8 +110,6 @@ pub fn collect_actions(
     }
 
     items.extend(ssh_host_actions());
-    items.extend(container_actions("docker"));
-    items.extend(container_actions("podman"));
     items.extend(history_directory_actions(history));
     items.extend(history_project_actions(history));
     items.extend(history_action_actions(history));
@@ -119,6 +117,12 @@ pub fn collect_actions(
     items.extend(history_connection_actions(history));
     items.extend(custom_command_actions(custom_actions));
 
+    dedupe(items)
+}
+
+pub fn collect_container_actions() -> Vec<QuickActionItem> {
+    let mut items = container_actions("docker");
+    items.extend(container_actions("podman"));
     dedupe(items)
 }
 

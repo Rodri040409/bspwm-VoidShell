@@ -135,6 +135,7 @@ cargo run -- --execute "git status"
 - `Alt+C`: copiar
 - `Alt+P`: pegar
 - `Ctrl+Shift+A`: seleccionar todo el contenido del panel activo
+- `Ctrl+C`: copiar cuando hay texto seleccionado; sin selección conserva la interrupción del proceso
 - `Ctrl+Shift+C`: copiar selección del panel activo
 - `Ctrl+Shift+V`: pegar en el panel activo
 - `Alt+,`: preferencias
@@ -249,6 +250,9 @@ https://github.com/Rodri040409/bspwm-VoidShell.git
 
 - Cuando hay muchos paneles, VoidShell entra en modo compacto y reduce chrome secundario, badges y wallpapers no esenciales.
 - El refresco contextual de paneles inactivos se hace con menos frecuencia para bajar carga en `/proc` y en consultas de git.
+- La detección contextual y el descubrimiento de contenedores se ejecutan fuera del hilo de GTK para mantener fluida la interfaz.
+- Redimensionar un panel actualiza únicamente su divisor; no reconstruye todo el árbol visual.
+- El CSS global y las observaciones repetidas del historial se deduplican para evitar trabajo y escrituras innecesarias.
 - El wallpaper ahora se pinta una sola vez detrás de todos los paneles; eso reduce trabajo de render y mantiene continuidad visual.
 - La IP pública se cachea para no meter una consulta de red completa en cada render del banner.
 

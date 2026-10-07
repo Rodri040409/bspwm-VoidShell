@@ -4,8 +4,8 @@ use crate::constants;
 use crate::context::{PanelContext, PanelMode};
 use crate::theme;
 use crate::util;
-use gtk::glib;
 use gtk::prelude::*;
+use gtk::{gio, glib};
 use std::cell::{Cell, RefCell};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -73,6 +73,8 @@ pub struct TerminalPane {
     last_command: RefCell<Option<String>>,
     context: RefCell<PanelContext>,
     context_tick: Cell<u64>,
+    context_refresh_in_flight: Cell<bool>,
+    context_refresh_queued: Cell<bool>,
     output_pulse_pending: Cell<bool>,
     is_active: Cell<bool>,
     compact_mode: Cell<bool>,
@@ -229,6 +231,8 @@ impl TerminalPane {
             last_command: RefCell::new(None),
             context: RefCell::new(PanelContext::default()),
             context_tick: Cell::new(0),
+            context_refresh_in_flight: Cell::new(false),
+            context_refresh_queued: Cell::new(false),
             output_pulse_pending: Cell::new(false),
             is_active: Cell::new(false),
             compact_mode: Cell::new(false),
@@ -343,7 +347,7 @@ impl TerminalPane {
         self.refresh_density_visuals();
     }
 
-    pub fn run_command(&self, command: &str) {
+    pub fn run_command(self: &Rc<Self>, command: &str) {
         let trimmed = command.trim();
         if trimmed.is_empty() {
             return;
@@ -424,8 +428,6 @@ impl TerminalPane {
     }
 
     pub fn apply_config(&self, config: &AppConfig) {
-        theme::install_or_update(config);
-
         self.terminal_wrap.set_margin_top(config.panel_padding);
         self.terminal_wrap.set_margin_bottom(config.panel_padding);
         self.terminal_wrap.set_margin_start(config.panel_padding);
@@ -711,7 +713,7 @@ impl TerminalPane {
         }
     }
 
-    fn drain_shell_events(&self) {
+    fn drain_shell_events(self: &Rc<Self>) {
         let mut events = Vec::new();
         let mut disconnected = false;
 
@@ -761,61 +763,85 @@ impl TerminalPane {
         }
     }
 
-    fn refresh_context(&self) {
+    fn refresh_context(self: &Rc<Self>) {
+        if self.context_refresh_in_flight.replace(true) {
+            self.context_refresh_queued.set(true);
+            return;
+        }
+
         let tick = self.context_tick.get() + 1;
         self.context_tick.set(tick);
-
-        let shell = util::shell_name(&self.shell_path);
-        let mut next = PanelContext {
-            cwd: self.current_directory.borrow().clone(),
-            hostname: util::hostname(),
-            shell: shell.clone(),
-            shell_alive: self.child_pid.get().is_some(),
-            foreground_process: self.child_pid.get().map(|_| shell),
-            foreground_command: self.last_command.borrow().clone(),
-            in_ssh: false,
-            ssh_target: None,
-            container_hint: None,
-            git_branch: None,
-            lab_hint: None,
-            python_project: None,
-            active_python_venv: None,
-            network: crate::context::NetworkContext::default(),
-            mode: if self.child_pid.get().is_some() {
-                PanelMode::Shell
-            } else {
-                PanelMode::Exited
-            },
-        };
-
         let previous = self.context.borrow().clone();
-        let should_refresh_git =
-            previous.cwd != next.cwd || (self.is_active.get() && tick % 4 == 0) || tick % 12 == 0;
-        next.git_branch = if should_refresh_git {
-            next.cwd
-                .as_deref()
-                .and_then(crate::context::detect_git_branch)
-        } else {
-            previous.git_branch.clone()
-        };
-        let should_refresh_python_project = previous.cwd != next.cwd
-            || previous.active_python_venv != next.active_python_venv
-            || (self.is_active.get() && tick % 4 == 0)
-            || tick % 12 == 0;
-        next.python_project = if should_refresh_python_project {
-            next.cwd
-                .as_deref()
-                .and_then(crate::context::detect_python_project)
-        } else {
-            previous.python_project.clone()
-        };
+        let cwd = self.current_directory.borrow().clone();
+        let shell_path = self.shell_path.clone();
+        let shell_alive = self.child_pid.get().is_some();
+        let last_command = self.last_command.borrow().clone();
+        let is_active = self.is_active.get();
+        let task = gio::spawn_blocking(move || {
+            let shell = util::shell_name(&shell_path);
+            let mut next = PanelContext {
+                cwd,
+                hostname: util::hostname(),
+                shell: shell.clone(),
+                shell_alive,
+                foreground_process: shell_alive.then_some(shell),
+                foreground_command: last_command,
+                in_ssh: false,
+                ssh_target: None,
+                container_hint: None,
+                git_branch: None,
+                lab_hint: None,
+                python_project: None,
+                active_python_venv: None,
+                network: crate::context::NetworkContext::default(),
+                mode: if shell_alive {
+                    PanelMode::Shell
+                } else {
+                    PanelMode::Exited
+                },
+            };
 
-        self.render_context(&next);
+            let should_refresh_git =
+                previous.cwd != next.cwd || (is_active && tick % 4 == 0) || tick % 12 == 0;
+            next.git_branch = if should_refresh_git {
+                next.cwd
+                    .as_deref()
+                    .and_then(crate::context::detect_git_branch)
+            } else {
+                previous.git_branch.clone()
+            };
+            let should_refresh_python_project = previous.cwd != next.cwd
+                || previous.active_python_venv != next.active_python_venv
+                || (is_active && tick % 4 == 0)
+                || tick % 12 == 0;
+            next.python_project = if should_refresh_python_project {
+                next.cwd
+                    .as_deref()
+                    .and_then(crate::context::detect_python_project)
+            } else {
+                previous.python_project.clone()
+            };
+            next
+        });
 
-        if previous != next {
-            *self.context.borrow_mut() = next.clone();
-            (self.callbacks.on_context_changed)(self.id, next);
-        }
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let result = task.await;
+            if let Some(pane) = weak.upgrade() {
+                pane.context_refresh_in_flight.set(false);
+                if let Ok(next) = result {
+                    let previous = pane.context.borrow().clone();
+                    if previous != next {
+                        pane.render_context(&next);
+                        *pane.context.borrow_mut() = next.clone();
+                        (pane.callbacks.on_context_changed)(pane.id, next);
+                    }
+                }
+                if pane.context_refresh_queued.replace(false) {
+                    pane.refresh_context();
+                }
+            }
+        });
     }
 
     fn render_context(&self, context: &PanelContext) {

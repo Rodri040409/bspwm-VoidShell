@@ -6,7 +6,13 @@ use gtk::gdk;
 use std::cell::RefCell;
 
 thread_local! {
-    static CSS_PROVIDER: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
+    static CSS_PROVIDER: RefCell<Option<ThemeProviderState>> = const { RefCell::new(None) };
+}
+
+struct ThemeProviderState {
+    provider: gtk::CssProvider,
+    css: String,
+    installed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,17 +91,29 @@ pub struct TerminalPalette {
 }
 
 pub fn install_or_update(app_config: &AppConfig) {
+    let css = build_css(app_config);
     CSS_PROVIDER.with(|slot| {
         let mut slot = slot.borrow_mut();
-        let provider = slot.get_or_insert_with(gtk::CssProvider::new);
-        provider.load_from_string(&build_css(app_config));
+        let state = slot.get_or_insert_with(|| ThemeProviderState {
+            provider: gtk::CssProvider::new(),
+            css: String::new(),
+            installed: false,
+        });
 
-        if let Some(display) = gdk::Display::default() {
+        if state.css != css {
+            state.provider.load_from_string(&css);
+            state.css = css;
+        }
+
+        if !state.installed
+            && let Some(display) = gdk::Display::default()
+        {
             gtk::style_context_add_provider_for_display(
                 &display,
-                provider,
+                &state.provider,
                 gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
             );
+            state.installed = true;
         }
     });
 }

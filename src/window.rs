@@ -19,7 +19,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const CONTAINER_ACTION_CACHE_TTL: Duration = Duration::from_secs(5);
 pub struct MainWindow;
 
 #[derive(Debug, Clone, Default)]
@@ -40,6 +42,7 @@ struct WindowState {
     title_label: gtk::Label,
     subtitle_label: gtk::Label,
     layout: RefCell<TileTree>,
+    split_widgets: RefCell<BTreeMap<u64, gtk::Paned>>,
     panes: RefCell<BTreeMap<u64, Rc<TerminalPane>>>,
     focused_pane: Cell<Option<u64>>,
     zoomed_pane: Cell<Option<u64>>,
@@ -55,6 +58,10 @@ struct WindowState {
     palette_search: gtk::SearchEntry,
     palette_list: gtk::ListBox,
     palette_items: RefCell<Vec<QuickActionItem>>,
+    palette_container_items: RefCell<Vec<QuickActionItem>>,
+    palette_container_cached_at: Cell<Option<Instant>>,
+    palette_container_refreshing: Cell<bool>,
+    palette_generation: Cell<u64>,
     toast_revealer: gtk::Revealer,
     toast_label: gtk::Label,
     toast_serial: Cell<u64>,
@@ -249,6 +256,7 @@ impl WindowState {
             title_label,
             subtitle_label,
             layout: RefCell::new(TileTree::default()),
+            split_widgets: RefCell::new(BTreeMap::new()),
             panes: RefCell::new(BTreeMap::new()),
             focused_pane: Cell::new(None),
             zoomed_pane: Cell::new(None),
@@ -264,6 +272,10 @@ impl WindowState {
             palette_search,
             palette_list,
             palette_items: RefCell::new(Vec::new()),
+            palette_container_items: RefCell::new(Vec::new()),
+            palette_container_cached_at: Cell::new(None),
+            palette_container_refreshing: Cell::new(false),
+            palette_generation: Cell::new(0),
             toast_revealer,
             toast_label,
             toast_serial: Cell::new(0),
@@ -546,20 +558,24 @@ impl WindowState {
 
     fn on_context_changed(self: &Rc<Self>, pane_id: u64, context: PanelContext) {
         let mut history = self.history.borrow_mut();
+        let mut history_changed = false;
         if let Some(cwd) = &context.cwd {
-            history.note_directory(cwd);
+            history_changed |= history.note_directory(cwd);
             if context.git_branch.is_some() {
-                history.note_project(cwd);
+                history_changed |= history.note_project(cwd);
             }
         }
         if let Some((title, command, category)) = quick_actions::detected_command_entry(&context) {
-            history.note_command(&title, &command, &category);
+            history_changed |= history.note_command(&title, &command, &category);
         }
         if let Some(target) = context.ssh_target.as_deref() {
-            history.note_connection(&format!("SSH {target}"), &format!("ssh {target}"));
+            history_changed |=
+                history.note_connection(&format!("SSH {target}"), &format!("ssh {target}"));
         }
         drop(history);
-        self.persist_history();
+        if history_changed {
+            self.persist_history();
+        }
         self.refresh_header();
         self.handle_python_venv_context(pane_id, &context);
     }
@@ -817,6 +833,7 @@ impl WindowState {
     }
 
     fn rebuild_layout(self: &Rc<Self>) {
+        self.split_widgets.borrow_mut().clear();
         for pane in self.panes.borrow().values() {
             pane.detach_from_parent();
         }
@@ -836,6 +853,14 @@ impl WindowState {
                 }
             })
         };
+        let paned_created = {
+            let weak = Rc::downgrade(self);
+            Rc::new(move |split_id: u64, paned: gtk::Paned| {
+                if let Some(state) = weak.upgrade() {
+                    state.split_widgets.borrow_mut().insert(split_id, paned);
+                }
+            })
+        };
 
         if self.zoomed_pane.get().is_some() {
             self.layout_surface.add_css_class("zoomed");
@@ -848,7 +873,7 @@ impl WindowState {
         } else {
             self.layout
                 .borrow()
-                .build_widget(&self.panes.borrow(), ratio_update)
+                .build_widget(&self.panes.borrow(), ratio_update, paned_created)
         };
 
         if let Some(widget) = widget {
@@ -870,9 +895,14 @@ impl WindowState {
         self.refresh_header();
 
         if let Some(pane) = self.focused_pane_ref() {
-            let pane = pane.clone();
+            let weak = Rc::downgrade(self);
+            let pane_id = self.focused_pane.get();
             gtk::glib::idle_add_local_once(move || {
-                pane.focus_terminal();
+                if let Some(state) = weak.upgrade() {
+                    if state.focused_pane.get() == pane_id {
+                        pane.focus_terminal();
+                    }
+                }
             });
         }
     }
@@ -963,12 +993,27 @@ impl WindowState {
             return;
         };
 
-        if self
-            .layout
-            .borrow_mut()
-            .resize_leaf(pane_id, direction, constants::DEFAULT_RESIZE_STEP)
-        {
-            self.rebuild_layout();
+        let resized = self.layout.borrow_mut().resize_leaf_with_result(
+            pane_id,
+            direction,
+            constants::DEFAULT_RESIZE_STEP,
+        );
+        if let Some((split_id, ratio)) = resized {
+            self.set_split_widget_ratio(split_id, ratio);
+        }
+    }
+
+    fn set_split_widget_ratio(&self, split_id: u64, ratio: f32) {
+        let Some(paned) = self.split_widgets.borrow().get(&split_id).cloned() else {
+            return;
+        };
+        let total = match paned.orientation() {
+            gtk::Orientation::Horizontal => paned.width(),
+            gtk::Orientation::Vertical => paned.height(),
+            _ => 0,
+        };
+        if total > 0 {
+            paned.set_position((total as f32 * ratio).round() as i32);
         }
     }
 
@@ -1045,7 +1090,9 @@ impl WindowState {
         }
 
         if self.layout.borrow_mut().balance_ratios() {
-            self.rebuild_layout();
+            for (split_id, ratio) in self.layout.borrow().split_ratios() {
+                self.set_split_widget_ratio(split_id, ratio);
+            }
             self.show_toast("Mosaico equilibrado");
         } else {
             self.show_toast("El mosaico ya está equilibrado");
@@ -1526,17 +1573,57 @@ impl WindowState {
         self.rebuild_palette_rows();
         self.palette_revealer.set_reveal_child(true);
         self.palette_search.grab_focus();
+        self.refresh_container_actions();
     }
 
     fn refresh_palette_items(&self) {
         let context = self.focused_pane_ref().map(|pane| pane.context());
         let config = self.config.borrow();
-        let items = quick_actions::collect_actions(
+        let mut items = quick_actions::collect_local_actions(
             context.as_ref(),
             &self.history.borrow(),
             &config.custom_quick_actions,
         );
-        *self.palette_items.borrow_mut() = items;
+        items.extend(self.palette_container_items.borrow().iter().cloned());
+        *self.palette_items.borrow_mut() = quick_actions::dedupe_items(items);
+    }
+
+    fn refresh_container_actions(self: &Rc<Self>) {
+        if self
+            .palette_container_cached_at
+            .get()
+            .is_some_and(|cached_at| cached_at.elapsed() < CONTAINER_ACTION_CACHE_TTL)
+        {
+            return;
+        }
+        if self.palette_container_refreshing.replace(true) {
+            return;
+        }
+
+        let generation = self.palette_generation.get().wrapping_add(1);
+        self.palette_generation.set(generation);
+        let task = gio::spawn_blocking(quick_actions::collect_container_actions);
+        let weak = Rc::downgrade(self);
+        gtk::glib::MainContext::default().spawn_local(async move {
+            let result = task.await;
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            state.palette_container_refreshing.set(false);
+            let Ok(items) = result else {
+                return;
+            };
+            if state.palette_generation.get() != generation {
+                return;
+            }
+
+            *state.palette_container_items.borrow_mut() = items;
+            state.palette_container_cached_at.set(Some(Instant::now()));
+            if state.palette_revealer.reveals_child() {
+                state.refresh_palette_items();
+                state.rebuild_palette_rows();
+            }
+        });
     }
 
     fn refresh_palette_if_open(self: &Rc<Self>) {
@@ -1821,8 +1908,7 @@ impl WindowState {
 
     fn close_focus_candidate(&self, pane_id: u64) -> Option<u64> {
         let current_rect = self.pane_rect(pane_id)?;
-        let center = center_of(&current_rect);
-        let mut best: Option<(u64, f32)> = None;
+        let mut best: Option<(u64, CloseCandidateScore)> = None;
 
         for (candidate_id, pane) in self.panes.borrow().iter() {
             if *candidate_id == pane_id {
@@ -1832,27 +1918,12 @@ impl WindowState {
             let Some(rect) = pane.widget().compute_bounds(&self.layout_host) else {
                 continue;
             };
-            let candidate = center_of(&rect);
-            let dx = candidate.0 - center.0;
-            let dy = candidate.1 - center.1;
-            let distance = (dx * dx + dy * dy).sqrt();
-
-            let horizontal_overlap = overlap_span(
-                current_rect.x(),
-                current_rect.x() + current_rect.width(),
-                rect.x(),
-                rect.x() + rect.width(),
-            );
-            let vertical_overlap = overlap_span(
-                current_rect.y(),
-                current_rect.y() + current_rect.height(),
-                rect.y(),
-                rect.y() + rect.height(),
-            );
-
-            let overlap_bonus = horizontal_overlap.max(vertical_overlap) * 0.22;
-            let score = distance - overlap_bonus;
-            if best.map(|(_, current)| score < current).unwrap_or(true) {
+            let score = close_candidate_score(&current_rect, &rect);
+            if best
+                .as_ref()
+                .map(|(_, current)| score.is_better_than(current))
+                .unwrap_or(true)
+            {
                 best = Some((*candidate_id, score));
             }
         }
@@ -1887,11 +1958,30 @@ impl WindowState {
     }
 
     fn spawn_split(self: &Rc<Self>, current_id: u64, axis: SplitAxis, position: InsertPosition) {
-        let cwd = self
-            .panes
-            .borrow()
-            .get(&current_id)
+        if self.closing_panes.borrow().contains(&current_id) {
+            return;
+        }
+
+        let panes = self.panes.borrow();
+        let Some(current_pane) = panes.get(&current_id) else {
+            return;
+        };
+        let parent_directory = current_pane.current_directory();
+        let focused_directory = self
+            .focused_pane
+            .get()
+            .filter(|pane_id| *pane_id != current_id)
+            .and_then(|pane_id| panes.get(&pane_id))
             .and_then(|pane| pane.current_directory());
+        drop(panes);
+
+        let cwd = select_working_directory([
+            parent_directory,
+            focused_directory,
+            self.working_directory.clone(),
+            std::env::current_dir().ok(),
+            util::home_dir(),
+        ]);
         let shell_path = self.resolved_shell_path();
         let pane_id = self.allocate_pane_id();
         let pane = TerminalPane::new(
@@ -2029,7 +2119,10 @@ impl WindowState {
             self.zoomed_pane.set(None);
         }
 
-        let _ = self.layout.borrow_mut().remove_leaf(pane_id);
+        let mut layout = self.layout.borrow_mut();
+        let _ = layout.remove_leaf(pane_id);
+        layout.prefer_side_by_side_when_two_panes();
+        drop(layout);
 
         if self.panes.borrow().is_empty() || self.layout.borrow().leaf_count() == 0 {
             self.focused_pane.set(None);
@@ -2097,6 +2190,10 @@ fn shell_is_idle(context: &PanelContext) -> bool {
             .as_deref()
             .map(|process| process == context.shell.as_str())
             .unwrap_or(true)
+}
+
+fn select_working_directory<const N: usize>(candidates: [Option<PathBuf>; N]) -> Option<PathBuf> {
+    candidates.into_iter().flatten().next()
 }
 
 fn should_auto_deactivate_venv(
@@ -2211,6 +2308,79 @@ fn center_of(rect: &gtk::graphene::Rect) -> (f32, f32) {
 
 fn overlap_span(start_a: f32, end_a: f32, start_b: f32, end_b: f32) -> f32 {
     (end_a.min(end_b) - start_a.max(start_b)).max(0.0)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CloseCandidateScore {
+    axis_priority: u8,
+    primary_gap: f32,
+    secondary_offset: f32,
+    distance: f32,
+}
+
+impl CloseCandidateScore {
+    fn is_better_than(self, other: &Self) -> bool {
+        (
+            self.axis_priority,
+            self.primary_gap,
+            self.secondary_offset,
+            self.distance,
+        )
+            .partial_cmp(&(
+                other.axis_priority,
+                other.primary_gap,
+                other.secondary_offset,
+                other.distance,
+            ))
+            .is_some_and(|ordering| ordering.is_lt())
+    }
+}
+
+fn close_candidate_score(
+    current: &gtk::graphene::Rect,
+    candidate: &gtk::graphene::Rect,
+) -> CloseCandidateScore {
+    let current_center = center_of(current);
+    let candidate_center = center_of(candidate);
+    let dx = candidate_center.0 - current_center.0;
+    let dy = candidate_center.1 - current_center.1;
+    let horizontal_overlap = overlap_span(
+        current.x(),
+        current.x() + current.width(),
+        candidate.x(),
+        candidate.x() + candidate.width(),
+    );
+    let vertical_overlap = overlap_span(
+        current.y(),
+        current.y() + current.height(),
+        candidate.y(),
+        candidate.y() + candidate.height(),
+    );
+
+    let (axis_priority, primary_gap, secondary_offset) = if vertical_overlap > 0.0 {
+        let gap = if dx < 0.0 {
+            current.x() - (candidate.x() + candidate.width())
+        } else {
+            candidate.x() - (current.x() + current.width())
+        };
+        (0, gap.max(0.0), dy.abs())
+    } else if horizontal_overlap > 0.0 {
+        let gap = if dy < 0.0 {
+            current.y() - (candidate.y() + candidate.height())
+        } else {
+            candidate.y() - (current.y() + current.height())
+        };
+        (1, gap.max(0.0), dx.abs())
+    } else {
+        (2, dx.abs().min(dy.abs()), dx.abs().max(dy.abs()))
+    };
+
+    CloseCandidateScore {
+        axis_priority,
+        primary_gap,
+        secondary_offset,
+        distance: (dx * dx + dy * dy).sqrt(),
+    }
 }
 
 fn build_palette_section_row(section: QuickActionSection, count: usize) -> gtk::ListBoxRow {
@@ -2332,6 +2502,55 @@ fn build_palette_empty_row(empty_query: bool) -> gtk::ListBoxRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn el_mosaico_hereda_primero_el_directorio_del_panel_origen() {
+        let selected = select_working_directory([
+            Some(PathBuf::from("/proyecto/origen")),
+            Some(PathBuf::from("/proyecto/enfocado")),
+            Some(PathBuf::from("/inicio")),
+        ]);
+
+        assert_eq!(selected, Some(PathBuf::from("/proyecto/origen")));
+    }
+
+    #[test]
+    fn el_mosaico_conserva_un_directorio_de_respaldo_durante_arranques_rapidos() {
+        let selected = select_working_directory([
+            None,
+            None,
+            Some(PathBuf::from("/directorio-de-arranque")),
+            Some(PathBuf::from("/directorio-del-proceso")),
+        ]);
+
+        assert_eq!(selected, Some(PathBuf::from("/directorio-de-arranque")));
+    }
+
+    #[test]
+    fn al_cerrar_prioriza_vecinos_laterales_sobre_verticales() {
+        let current = gtk::graphene::Rect::new(100.0, 100.0, 100.0, 100.0);
+        let right = gtk::graphene::Rect::new(260.0, 110.0, 100.0, 80.0);
+        let above = gtk::graphene::Rect::new(110.0, 10.0, 80.0, 80.0);
+
+        let right_score = close_candidate_score(&current, &right);
+        let above_score = close_candidate_score(&current, &above);
+
+        assert_eq!(right_score.axis_priority, 0);
+        assert_eq!(above_score.axis_priority, 1);
+        assert!(right_score.is_better_than(&above_score));
+    }
+
+    #[test]
+    fn entre_vecinos_laterales_elige_el_mas_cercano() {
+        let current = gtk::graphene::Rect::new(100.0, 100.0, 100.0, 100.0);
+        let left = gtk::graphene::Rect::new(20.0, 110.0, 70.0, 80.0);
+        let right = gtk::graphene::Rect::new(260.0, 110.0, 100.0, 80.0);
+
+        assert!(
+            close_candidate_score(&current, &left)
+                .is_better_than(&close_candidate_score(&current, &right))
+        );
+    }
 
     #[test]
     fn detecta_cuando_debe_desactivar_el_venv_al_salir_del_proyecto() {

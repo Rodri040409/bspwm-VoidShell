@@ -278,6 +278,26 @@ impl TileTree {
             .is_some_and(|root| collapse(root, target))
     }
 
+    /// Keep the final two panes side by side. This makes rapid close sequences
+    /// settle into the most useful terminal layout instead of leaving a tall
+    /// top/bottom split from an earlier branch of the tree.
+    pub fn prefer_side_by_side_when_two_panes(&mut self) -> bool {
+        if self.leaf_count() != 2 {
+            return false;
+        }
+
+        let Some(TileNode::Split { axis, .. }) = self.root.as_mut() else {
+            return false;
+        };
+
+        if *axis == SplitAxis::Vertical {
+            return false;
+        }
+
+        *axis = SplitAxis::Vertical;
+        true
+    }
+
     pub fn swap_leaves(&mut self, first_id: u64, second_id: u64) -> bool {
         if first_id == second_id {
             return false;
@@ -334,14 +354,42 @@ impl TileTree {
         }
     }
 
-    pub fn resize_leaf(&mut self, target: u64, direction: Direction, step: f32) -> bool {
+    pub fn split_ratios(&self) -> Vec<(u64, f32)> {
+        fn collect(node: &TileNode, ratios: &mut Vec<(u64, f32)>) {
+            if let TileNode::Split {
+                split_id,
+                ratio,
+                first,
+                second,
+                ..
+            } = node
+            {
+                ratios.push((*split_id, *ratio));
+                collect(first, ratios);
+                collect(second, ratios);
+            }
+        }
+
+        let mut ratios = Vec::new();
+        if let Some(root) = &self.root {
+            collect(root, &mut ratios);
+        }
+        ratios
+    }
+
+    pub fn resize_leaf_with_result(
+        &mut self,
+        target: u64,
+        direction: Direction,
+        step: f32,
+    ) -> Option<(u64, f32)> {
         let mut path = Vec::new();
         let Some(root) = &self.root else {
-            return false;
+            return None;
         };
 
         if !find_path(root, target, &mut path) {
-            return false;
+            return None;
         }
 
         for depth in (0..path.len()).rev() {
@@ -354,23 +402,26 @@ impl TileTree {
                     (SplitAxis::Horizontal, ChildSide::First, Direction::Down) => ratio + step,
                     _ => continue,
                 };
+                let new_ratio = new_ratio.clamp(0.15, 0.85);
                 self.update_split_ratio(split_id, new_ratio);
-                return true;
+                return Some((split_id, new_ratio));
             }
         }
 
-        false
+        None
     }
 
     pub fn build_widget(
         &self,
         panes: &BTreeMap<u64, Rc<TerminalPane>>,
         on_ratio_changed: Rc<dyn Fn(u64, f32)>,
+        on_paned_created: Rc<dyn Fn(u64, gtk::Paned)>,
     ) -> Option<gtk::Widget> {
         fn build_node(
             node: &TileNode,
             panes: &BTreeMap<u64, Rc<TerminalPane>>,
             on_ratio_changed: Rc<dyn Fn(u64, f32)>,
+            on_paned_created: Rc<dyn Fn(u64, gtk::Paned)>,
         ) -> Option<gtk::Widget> {
             match node {
                 TileNode::Leaf(id) => panes.get(id).map(|pane| pane.widget()),
@@ -381,13 +432,24 @@ impl TileTree {
                     first,
                     second,
                 } => {
-                    let start = build_node(first, panes, on_ratio_changed.clone())?;
-                    let end = build_node(second, panes, on_ratio_changed.clone())?;
+                    let start = build_node(
+                        first,
+                        panes,
+                        on_ratio_changed.clone(),
+                        on_paned_created.clone(),
+                    )?;
+                    let end = build_node(
+                        second,
+                        panes,
+                        on_ratio_changed.clone(),
+                        on_paned_created.clone(),
+                    )?;
                     let paned = gtk::Paned::new(axis.to_orientation());
                     paned.set_wide_handle(true);
                     paned.add_css_class("tile-paned");
                     paned.set_start_child(Some(&start));
                     paned.set_end_child(Some(&end));
+                    on_paned_created(*split_id, paned.clone());
 
                     let split = *split_id;
                     let orientation = *axis;
@@ -459,7 +521,7 @@ impl TileTree {
 
         self.root
             .as_ref()
-            .and_then(|root| build_node(root, panes, on_ratio_changed))
+            .and_then(|root| build_node(root, panes, on_ratio_changed, on_paned_created))
     }
 }
 
@@ -585,6 +647,18 @@ mod tests {
     }
 
     #[test]
+    fn con_dos_paneles_restantes_prioriza_el_mosaico_lateral() {
+        let mut tree = TileTree::default();
+        tree.set_root_leaf(1);
+        tree.split_leaf_with_position(1, 2, 10, SplitAxis::Horizontal, InsertPosition::After);
+
+        assert!(tree.prefer_side_by_side_when_two_panes());
+        assert_eq!(tree.parent_split_axis(1), Some(SplitAxis::Vertical));
+        assert_eq!(tree.parent_split_axis(2), Some(SplitAxis::Vertical));
+        assert!(!tree.prefer_side_by_side_when_two_panes());
+    }
+
+    #[test]
     fn intercambia_solo_las_hojas_solicitadas() {
         let mut tree = three_pane_tree();
 
@@ -598,9 +672,15 @@ mod tests {
     fn redimensiona_el_divisor_adecuado_y_respeta_limites() {
         let mut tree = three_pane_tree();
 
-        assert!(tree.resize_leaf(3, Direction::Up, 0.2));
+        assert!(
+            tree.resize_leaf_with_result(3, Direction::Up, 0.2)
+                .is_some()
+        );
         assert_eq!(tree.parent_split_axis(3), Some(SplitAxis::Horizontal));
-        assert!(tree.resize_leaf(1, Direction::Right, 10.0));
+        let resized = tree
+            .resize_leaf_with_result(1, Direction::Right, 10.0)
+            .expect("debe devolver el divisor actualizado");
+        assert_eq!(resized.1, 0.85);
 
         let mut current_ratios = Vec::new();
         ratios(tree.root.as_ref().unwrap(), &mut current_ratios);
@@ -609,7 +689,10 @@ mod tests {
                 .iter()
                 .all(|ratio| (0.15..=0.85).contains(ratio))
         );
-        assert!(!tree.resize_leaf(1, Direction::Up, 0.1));
+        assert!(
+            tree.resize_leaf_with_result(1, Direction::Up, 0.1)
+                .is_none()
+        );
     }
 
     #[test]

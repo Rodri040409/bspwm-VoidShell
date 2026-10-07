@@ -481,6 +481,21 @@ pub fn detect_panel_context(
     }
 }
 
+pub fn detect_current_directory(shell_pid: Option<i32>, pty_fd: Option<RawFd>) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let shell_pid = shell_pid?;
+        let target_pid = pty_fd.and_then(find_foreground_pid).unwrap_or(shell_pid);
+        return fs::read_link(format!("/proc/{target_pid}/cwd")).ok();
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (shell_pid, pty_fd);
+        None
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PythonProjectContext {
     pub project_root: PathBuf,

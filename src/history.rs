@@ -127,15 +127,22 @@ impl HistoryStore {
         }
     }
 
-    pub fn note_directory(&mut self, path: &Path) {
-        Self::touch_path(&mut self.recent_directories, path);
+    pub fn note_directory(&mut self, path: &Path) -> bool {
+        Self::touch_path(&mut self.recent_directories, path)
     }
 
-    pub fn note_project(&mut self, path: &Path) {
-        Self::touch_path(&mut self.recent_projects, path);
+    pub fn note_project(&mut self, path: &Path) -> bool {
+        Self::touch_path(&mut self.recent_projects, path)
     }
 
-    pub fn note_action(&mut self, title: &str, command: &str) {
+    pub fn note_action(&mut self, title: &str, command: &str) -> bool {
+        if self
+            .recent_quick_actions
+            .first()
+            .is_some_and(|item| item.title == title && item.command == command)
+        {
+            return false;
+        }
         let now = util::now_epoch_seconds();
         self.recent_quick_actions
             .retain(|item| item.command != command);
@@ -148,9 +155,15 @@ impl HistoryStore {
             },
         );
         self.recent_quick_actions.truncate(MAX_ITEMS);
+        true
     }
 
-    pub fn note_command(&mut self, title: &str, command: &str, category: &str) {
+    pub fn note_command(&mut self, title: &str, command: &str, category: &str) -> bool {
+        if self.recent_commands.first().is_some_and(|item| {
+            item.title == title && item.command == command && item.category == category
+        }) {
+            return false;
+        }
         let now = util::now_epoch_seconds();
         self.recent_commands.retain(|item| item.command != command);
         self.recent_commands.insert(
@@ -163,9 +176,17 @@ impl HistoryStore {
             },
         );
         self.recent_commands.truncate(MAX_ITEMS);
+        true
     }
 
-    pub fn note_connection(&mut self, label: &str, command: &str) {
+    pub fn note_connection(&mut self, label: &str, command: &str) -> bool {
+        if self
+            .recent_connections
+            .first()
+            .is_some_and(|item| item.label == label && item.command == command)
+        {
+            return false;
+        }
         let now = util::now_epoch_seconds();
         self.recent_connections
             .retain(|item| item.command != command && item.label != label);
@@ -178,10 +199,14 @@ impl HistoryStore {
             },
         );
         self.recent_connections.truncate(MAX_ITEMS);
+        true
     }
 
-    fn touch_path(items: &mut Vec<RecentPath>, path: &Path) {
+    fn touch_path(items: &mut Vec<RecentPath>, path: &Path) -> bool {
         let path = path.display().to_string();
+        if items.first().is_some_and(|item| item.path == path) {
+            return false;
+        }
         let now = util::now_epoch_seconds();
         items.retain(|item| item.path != path);
         items.insert(
@@ -192,5 +217,36 @@ impl HistoryStore {
             },
         );
         items.truncate(MAX_ITEMS);
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observaciones_repetidas_no_marcan_cambios() {
+        let mut history = HistoryStore::default();
+        let path = Path::new("/tmp/termvoid-project");
+
+        assert!(history.note_directory(path));
+        assert!(!history.note_directory(path));
+        assert!(history.note_project(path));
+        assert!(!history.note_project(path));
+        assert!(history.note_command("Cargo", "cargo test", "COMPILAR"));
+        assert!(!history.note_command("Cargo", "cargo test", "COMPILAR"));
+        assert!(history.note_connection("SSH host", "ssh host"));
+        assert!(!history.note_connection("SSH host", "ssh host"));
+    }
+
+    #[test]
+    fn una_observacion_distinta_sigue_actualizando_el_orden() {
+        let mut history = HistoryStore::default();
+
+        assert!(history.note_directory(Path::new("/tmp/uno")));
+        assert!(history.note_directory(Path::new("/tmp/dos")));
+        assert_eq!(history.recent_directories[0].path, "/tmp/dos");
+        assert_eq!(history.recent_directories[1].path, "/tmp/uno");
     }
 }
